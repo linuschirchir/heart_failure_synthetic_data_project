@@ -1,0 +1,45 @@
+# Windows system files
+desktop.ini
+Thumbs.db
+NTUSER.DAT*
+ntuser.dat*
+ntuser.ini
+nul
+con
+prn
+aux
+
+
+# OneDrive and temp files
+OneDrive*/
+*.lnk
+*.url
+AppData/
+Saved Games/
+Searches/
+Videos/
+
+# VSCode settings (optional, unless you want to share them)
+.vscode/
+
+# RStudio temporary files
+.Rproj.user/
+*.Rhistory
+*.RData
+*.Rproj
+.RDataTmp
+
+# Downloads folder (ignore all personal PDFs, statements, etc.)
+Downloads/
+
+# Documents temp uploads
+Documents/tmp.driveupload*/
+
+# Favorites and Links
+Favorites/
+Links/
+
+# Misc
+*.log
+
+/.quarto/

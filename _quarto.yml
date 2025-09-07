@@ -1,0 +1,10 @@
+project:
+  title: "Synthetic Data Quality Assessment Report"
+# author: "Linus Chirchir"
+# date: "2024-10-09"
+logo: "images/rds_logo.svg"
+output:
+  html:
+    toc: true
+    toc-depth: 2
+    number-sections: true

@@ -1,0 +1,4 @@
+- source: heart_failure_synthetic_data_project.qmd
+  quarto-pub:
+    - id: 33922773-a0ea-416e-a647-a1ffcca5c75a
+      url: https://linuschirchir.quarto.pub/heart-failure-clinical-records-synthetic-data-project

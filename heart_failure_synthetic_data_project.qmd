@@ -1,0 +1,2317 @@
+---
+title: Heart Failure Clinical Records Synthetic Data Project
+author: Linus Chirchir
+date: 7 September 2025
+date-format: "D MMMM YYYY"
+page-layout: full
+format: 
+  html:
+    toc: true
+    toc-depth: 4
+    toc-location: left
+    toc-float: true
+    number-sections: true
+    toc-title: "Contents"
+    css: styles/styles.css
+    code-fold: true
+    code-summary: "Show code"
+    code-tools: true
+    code-overflow: wrap
+  docx:
+    toc: true
+    toc-depth: 5
+    toc-location: left
+    toc-float: true
+    number-sections: true
+    toc-title: "Contents"
+    css: styles.css
+execute:
+  warning: false
+  message: false
+freeze: auto
+---
+
+```{r setup}
+
+# Load necessary libraries
+# --- Project and Performance Utilities ---
+library(here)                 # Manage project-relative file paths
+library(doParallel)           # Enable parallel processing for faster computations
+library(tidyverse)            # Core data science toolkit (dplyr, tidyr, readr, purrr, etc.)
+library(readxl)               # Import Excel (.xlsx, .xls) files into R
+
+# --- Data Exploration and Summaries ---
+library(psych)                # Produce descriptive statistics and psychometric analyses
+library(knitr)                # Format dynamic tables and reports in Markdown/Quarto
+
+# --- Visualisation ---
+library(ggplot2)              # Build customizable, high-quality data visualizations
+library(patchwork)            # Combine multiple ggplot2 plots into unified layouts
+library(corrplot)             # Visualize correlation matrices with heatmaps and plots
+library(GGally)               # Extend ggplot2 with correlation plots, pairwise plots, ggpairs()
+library(VIM)                  # Visualize/impute missing values with advanced methods (e.g., matrix plots)
+library(scales)
+
+# --- Data Imputation and Synthesis ---
+library(mice)                 # Perform multiple imputation by chained equations for missing data
+library(synthpop)             # Generate, evaluate, and compare synthetic datasets
+
+# --- Statistical and Information-Theoretic Measures ---
+library(transport)            # Compute optimal transport distances (e.g., Wasserstein) for distribution comparison
+library(infotheo)             # Calculate information-theoretic metrics (entropy, mutual information)
+
+# --- Modeling and Machine Learning ---
+library(caret)                # Streamline machine learning workflows (training, tuning, evaluation)
+library(xgboost)              # Implement gradient boosting for classification/regression
+library(SHAPforxgboost)       # Explain XGBoost predictions using SHAP values
+library(FNN)                  # Perform fast k-nearest neighbor searches and distance calculations
+
+# Set up parallel processing
+num_cores <- detectCores() - 1  # Use one less than the total number of cores
+cl <- makeCluster(num_cores)
+registerDoParallel(cl)
+```
+
+\newpage
+
+## Introduction
+
+This project evaluates the quality of synthetic datasets derived from the Heart Failure Clinical Records data (299 patients, 13 variables). Our goal is to determine how well different generation strategies reproduce the statistical properties and analytic value of the original data while protecting privacy.
+We generate synthetic data using four approaches: (1) parametric imputation (MICE), (2) non-parametric imputation (CART via MICE), (3) distribution-driven synthesis (synthpop), and (4) metadata-guided rules. We then compare each synthetic dataset with the real data across three dimensions:
+
+-	Fidelity – univariate and multivariate similarity (distributions, ranges, correlations), histogram similarity, and mutual information.
+-	Utility – model transportability using XGBoost (TRTR vs. TSTR), feature-importance agreement, and SHAP-based behaviour.
+-	Privacy / Disclosure risk – exact record matches, neighbour-proximity checks, and membership-inference sensitivity.
+
+Results are presented through aligned tables and plots (structure checks, categorical level retention, density overlays, correlation matrices, SHAP summaries) with concise scores for each method. The report concludes with a comparative summary to guide method selection given different fidelity–utility–privacy trade-offs.
+
+## Heart Failure Clinical Records Dataset and Initial Exploration  
+
+The **Heart Failure Clinical Records dataset**, sourced from the [UCI Machine Learning Repository](https://archive.ics.uci.edu/dataset/519/heart+failure+clinical+records), contains records of **299 patients** with heart failure collected during their follow-up period. Each record includes **13 clinical features** covering demographics, clinical conditions, and laboratory measures:  
+
+| Variable                    | Description                                          | Unit / Levels        |
+|-----------------------------|------------------------------------------------------|----------------------|
+| **age**                     | Age of the patient                                   | Years                |
+| **anaemia**                 | Reduction in red blood cells                         | No / Yes             |
+| **creatinine_phosphokinase**| Enzyme level in the blood                            | mcg/L                |
+| **diabetes**                | Diabetes status                                      | No / Yes             |
+| **ejection_fraction**       | % of blood leaving the heart with each contraction   | Percentage (%)       |
+| **platelets**               | Platelet count                                       | Kiloplatelets/mL     |
+| **serum_creatinine**        | Serum creatinine level                               | mg/dL                |
+| **serum_sodium**            | Serum sodium level                                   | mEq/L                |
+| **sex**                     | Gender of the patient                                | Female / Male        |
+| **smoking**                 | Smoking status                                       | No / Yes             |
+| **hypertension**            | Hypertension status                                  | No / Yes             |
+| **deceased**                | Survival status during follow-up                     | No / Yes             |
+| **follow_up**               | Duration of the follow-up period                     | Days                 |
+
+<br>
+
+A preview of the first 10 rows of the dataset is shown below.
+
+```{r load the heart failure dataset}
+
+# Set seed for reproducibility
+set.seed(123)
+
+# Load the heart failure dataset from the local directory
+heart_failure <- read.csv(here("data", "heart_failure.csv"))
+
+# Let's preview the heart failure dataset
+knitr::kable(
+  head(heart_failure, 10),
+  caption = "Preview of the first 10 rows of the Heart Failure dataset",
+  align = rep("l", ncol(heart_failure))  # left align all columns
+)
+```
+
+<br>
+
+Here's the preview of the structure of the heart failure dataset.
+
+```{r display the structure of the dataset}
+
+# Display the structure of the dataset
+data.frame(
+  Variable = names(heart_failure),
+  Type = sapply(heart_failure, \(x) paste(class(x), collapse = ", ")),
+  Values = sapply(heart_failure, \(x) paste(head(unique(x), 10), collapse = ", "))
+) |>
+  knitr::kable(
+    caption = "Structure of the Heart Failure Dataset: Variables, Types, and Values",
+    align = c("l","l","l")
+  )
+```
+
+<br>
+
+Let's perform some basic data cleaning and preprocessing steps. Convert the following columns to factors: sex, anaemia, diabetes, smoking, hypertension and deceased. Here's the new structure of the dataset after the basic cleaning.
+
+```{r modify structure of the dataset}
+
+# Convert the specified columns to factors
+heart_failure$sex <- as.factor(heart_failure$sex)
+heart_failure$anaemia <- as.factor(heart_failure$anaemia)
+heart_failure$diabetes <- as.factor(heart_failure$diabetes)
+heart_failure$smoking <- as.factor(heart_failure$smoking)
+heart_failure$hypertension <- as.factor(heart_failure$hypertension)
+heart_failure$deceased <- as.factor(heart_failure$deceased)
+```
+
+Here are the summary statistics of the heart failure dataset.
+
+```{r summary statistics of the heart failure dataset}
+
+# Generate descriptive statistics and display as a single table
+describe(heart_failure) |>
+  kable(
+    caption = "Summary Statistics of the Heart Failure Dataset",
+    digits = 2,  # round to 2 decimal places
+    align = "lrrrrrrrrrr"  # left for variable, right for numbers
+  )
+```
+
+## Generating Synthetic Data
+
+The process of generating synthetic data is essential for tasks such as privacy preservation, testing machine learning models, and conducting simulations. In this section, we employ various techniques to generate synthetic data based on the real heart failure dataset. Each method serves a different purpose and offers distinct advantages, depending on the use case and the type of missing data or privacy concerns.
+
+We explore four key approaches for generating synthetic data:
+
+### Parametric Imputation Using MICE
+
+This method uses the Multivariate Imputation by Chained Equations (MICE) framework, with parametric imputation based on a normal distribution. MICE allows for handling missing data through multiple imputations and is widely used in data science and healthcare for its flexibility and statistical rigor. Here's the preview of the first 10 rows of the synthetic data generated.
+
+```{r Parametric Imputation using MICE}
+
+# Function to compute the 5th and 95th percentiles for numeric columns
+compute_percentiles <- function(data, lower_percentile = 0.05, upper_percentile = 0.95) {
+  percentiles <- lapply(data, function(column) {
+    if (is.numeric(column)) {
+      lower <- quantile(column, probs = lower_percentile, na.rm = TRUE)
+      upper <- quantile(column, probs = upper_percentile, na.rm = TRUE)
+      return(c(lower, upper))
+    }
+    return(c(NA, NA))
+  })
+  names(percentiles) <- names(data)
+  return(percentiles)
+}
+
+# Function to scale numeric values based on the 5th and 95th percentiles
+scale_to_percentiles <- function(data, percentiles) {
+  scaled_data <- data
+  for (col in colnames(data)) {
+    if (is.numeric(data[[col]])) {
+      # Apply scaling only if percentiles are available for this column
+      if (!is.na(percentiles[[col]][1]) && !is.na(percentiles[[col]][2])) {
+        min_val <- percentiles[[col]][1]
+        max_val <- percentiles[[col]][2]
+        # Clip values to lie within the 5th and 95th percentile range
+        scaled_data[[col]] <- pmin(pmax(data[[col]], min_val), max_val)
+      }
+    }
+  }
+  return(scaled_data)
+}
+
+# Function to generate missingness in a dataset based on the real data's pattern
+generate_missingness_based_on_real <- function(real_data, synthetic_data) {
+  # Ensure the synthetic dataset has the same structure as the real
+  if (!all(colnames(real_data) == colnames(synthetic_data))) {
+    stop("Column names in real and synthetic data must match")
+  }
+  
+  # Copy the real missingness pattern to the synthetic dataset
+  synthetic_data_with_missingness <- synthetic_data
+  for (col in colnames(real_data)) {
+    # Apply missingness where it was present in the real data
+    missing_indices <- is.na(real_data[[col]])
+    synthetic_data_with_missingness[[col]][missing_indices] <- NA
+  }
+  
+  return(synthetic_data_with_missingness)
+}
+
+# Compute the 5th and 95th percentiles for the real data
+percentiles <- compute_percentiles(heart_failure)
+
+# Generate synthetic data using MICE
+where <- make.where(heart_failure, "all")
+method <- make.method(heart_failure, where = where)
+method[method == "pmm"] <- "norm"
+
+# Perform multiple imputation (10 datasets)
+syn_param <- mice(heart_failure, m = 10, maxit = 1, method = method, where = where, printFlag = FALSE)
+
+# Extract the first synthetic dataset
+syn_data_1 <- complete(syn_param, 1)
+
+# Scale synthetic data to the 5th and 95th percentile ranges
+syn_data_1 <- scale_to_percentiles(syn_data_1, percentiles)
+
+# Apply the real missingness pattern to the synthetic dataset
+syn_data_1 <- generate_missingness_based_on_real(heart_failure, syn_data_1)
+
+# Round off all numeric columns to 0 decimal places
+syn_data_1 <- syn_data_1 %>%
+  mutate(across(where(is.numeric), round, digits = 0))
+
+# Add a prefix 'synth_' to all synthetic dataset variable names
+colnames(syn_data_1) <- paste("synth", colnames(syn_data_1), sep = "_")
+
+# Display the structure of the dataset
+data.frame(
+  Variable = names(syn_data_1),
+  Type = sapply(syn_data_1, \(x) paste(class(x), collapse = ", ")),
+  Values = sapply(syn_data_1, \(x) paste(head(unique(x), 10), collapse = ", "))
+) |>
+  knitr::kable(
+    caption = "Structure of the Heart Failure Dataset: Variables, Types, and Values",
+    align = c("l","l","l")
+  )
+```
+
+### Non-Parametric Imputation Using CART
+
+The Classification and Regression Trees (CART) method, a non-parametric approach, is useful for imputation when the relationships between variables are complex or non-linear. By leveraging decision trees, CART is capable of capturing intricate patterns in the data without making strong assumptions about the underlying distributions. Here's the preview of the first 10 rows of the synthetic data generated.
+
+```{r Non-Parametric Imputation using CART}
+
+# Compute the 5th and 95th percentiles for the real data
+percentiles <- compute_percentiles(heart_failure)
+
+# Generate synthetic data using CART imputation with MICE
+where <- make.where(heart_failure, "all")
+method <- make.method(heart_failure, where = where)
+method[method == "pmm"] <- "cart"  # Set the method to "cart" for non-parametric imputation
+
+# Perform multiple imputation (10 datasets)
+syn_cart <- mice(heart_failure, m = 10, maxit = 1, method = method, where = where, printFlag = FALSE)
+
+# Extract the first synthetic dataset
+syn_cart_1 <- complete(syn_cart, 1)
+
+# Scale synthetic data to the 5th and 95th percentile ranges
+syn_cart_1 <- scale_to_percentiles(syn_cart_1, percentiles)
+
+# Apply the real missingness pattern to the synthetic dataset
+syn_cart_1 <- generate_missingness_based_on_real(heart_failure, syn_cart_1)
+
+# Round off all numeric columns to 0 decimal places
+syn_cart_1 <- syn_cart_1 %>%
+  mutate(across(where(is.numeric), round, digits = 0))
+
+# Add a prefix 'synth_' to all synthetic dataset variable names
+colnames(syn_cart_1) <- paste("synth", colnames(syn_cart_1), sep = "_")
+
+# Display the structure of the dataset
+data.frame(
+  Variable = names(syn_cart_1),
+  Type = sapply(syn_cart_1, \(x) paste(class(x), collapse = ", ")),
+  Values = sapply(syn_cart_1, \(x) paste(head(unique(x), 10), collapse = ", "))
+) |>
+  knitr::kable(
+    caption = "Structure of the Heart Failure Dataset: Variables, Types, and Values",
+    align = c("l","l","l")
+  )
+```
+
+### Generating Synthetic Data Using Synthpop
+
+The Synthpop package is designed for creating synthetic data based on the distribution of the real dataset. It is particularly useful for privacy-preserving data sharing, where the aim is to create a synthetic dataset that mimics the real data without exposing sensitive information. Here's the preview of the first 10 rows of the synthetic data generated.
+
+```{r Generating Synthetic Data using Synthpop}
+
+# Compute the 5th and 95th percentiles for the real data
+percentiles <- compute_percentiles(heart_failure)
+
+# Generate low-fidelity synthetic data using random sampling
+syn_data_low_fidelity <- syn(heart_failure, method = "sample", seed = 123)
+
+# Convert the synthetic dataset to a data frame
+syn_data_low_fidelity_synthpop <- syn_data_low_fidelity$syn
+
+# Scale the synthetic data to the 5th and 95th percentile ranges
+syn_data_low_fidelity_synthpop <- scale_to_percentiles(syn_data_low_fidelity_synthpop, percentiles)
+
+# Apply the real missingness pattern to the synthetic dataset
+syn_data_low_fidelity_synthpop <- generate_missingness_based_on_real(heart_failure, syn_data_low_fidelity_synthpop)
+
+# Round off all numeric columns to 0 decimal places
+syn_data_low_fidelity_synthpop <- syn_data_low_fidelity_synthpop %>%
+  mutate(across(where(is.numeric), round, digits = 0))
+
+# Add a prefix 'synth_' to all synthetic dataset variable names
+colnames(syn_data_low_fidelity_synthpop) <- paste("synth", colnames(syn_data_low_fidelity_synthpop), sep = "_")
+
+# Display the structure of the dataset
+data.frame(
+  Variable = names(syn_data_low_fidelity_synthpop),
+  Type = sapply(syn_data_low_fidelity_synthpop, \(x) paste(class(x), collapse = ", ")),
+  Values = sapply(syn_data_low_fidelity_synthpop, \(x) paste(head(unique(x), 10), collapse = ", "))
+) |>
+  knitr::kable(
+    caption = "Structure of the Heart Failure Dataset: Variables, Types, and Values",
+    align = c("l","l","l")
+  )
+```
+
+### Generating Synthetic Data Using Metadada
+
+This method uses a data dictionary (metadata) to drive the generation of synthetic data. The metadata defines the structure and types of variables, which ensures that the generated synthetic data conforms to expected formats, such as ranges for continuous variables and categories for binary or categorical variables. Here's the preview of the first 10 rows of the synthetic data generated.
+
+```{r Generating Synthetic Data using Metadata}
+
+# Compute the 5th and 95th percentiles for the real data
+percentiles <- compute_percentiles(heart_failure)
+
+# Generate synthetic data using metadata
+
+# Load the metadata from the Excel file
+heart_failure_metadata <- read_excel(here("data", "heart_failure_metadata.xlsx"))
+
+# Create an empty data frame based on the metadata structure
+n_rows <- nrow(heart_failure)  # Number of synthetic records to generate
+variable_names <- heart_failure_metadata$`Variable Name`
+data_types <- heart_failure_metadata$Type
+
+syn_data_metadata <- data.frame(matrix(ncol = length(variable_names), nrow = n_rows))
+colnames(syn_data_metadata) <- variable_names
+
+# Function to generate data based on metadata
+generate_data <- function(variable, real_data, type, n) {
+  if (type == "Continuous" || type == "Integer") {
+    if (is.numeric(real_data[[variable]])) {
+      # Compute 5th and 95th percentiles for numeric variables
+      p5 <- quantile(real_data[[variable]], probs = 0.05, na.rm = TRUE)
+      p95 <- quantile(real_data[[variable]], probs = 0.95, na.rm = TRUE)
+      
+      if (type == "Continuous") {
+        return(runif(n, min = p5, max = p95))
+      } else if (type == "Integer") {
+        return(sample(floor(p5):ceiling(p95), n, replace = TRUE))
+      }
+    }
+  } else if (is.factor(real_data[[variable]])) {
+    return(sample(levels(real_data[[variable]]), n, replace = TRUE))
+  } else if (variable %in% c("anaemia", "diabetes", "hypertension", "smoking", "sex")) {
+    return(sample(unique(real_data[[variable]]), n, replace = TRUE))
+  } else {
+    return(rep(NA, n))
+  }
+}
+
+# Generate synthetic data based on the metadata
+for (i in seq_along(variable_names)) {
+  syn_data_metadata[[i]] <- generate_data(variable_names[i], heart_failure, data_types[i], n_rows)
+}
+
+# Scale the synthetic data to the 5th and 95th percentile ranges
+syn_data_metadata <- scale_to_percentiles(syn_data_metadata, percentiles)
+
+# Apply the real missingness pattern to the synthetic dataset
+syn_data_metadata <- generate_missingness_based_on_real(heart_failure, syn_data_metadata)
+
+# Round off all numeric columns to 0 decimal places
+syn_data_metadata <- syn_data_metadata %>%
+  mutate(across(where(is.numeric), round, digits = 0))
+
+# Add a prefix 'synth_' to all synthetic dataset variable names
+colnames(syn_data_metadata) <- paste("synth", colnames(syn_data_metadata), sep = "_")
+
+# Display the structure of the dataset
+data.frame(
+  Variable = names(syn_data_metadata),
+  Type = sapply(syn_data_metadata, \(x) paste(class(x), collapse = ", ")),
+  Values = sapply(syn_data_metadata, \(x) paste(head(unique(x), 10), collapse = ", "))
+) |>
+  knitr::kable(
+    caption = "Structure of the Heart Failure Dataset: Variables, Types, and Values",
+    align = c("l","l","l")
+  )
+```
+
+## Synthetic Data Identification
+
+In this section, we generate tables to identify which columns in the synthetic datasets are synthetic (prefixed with "synth_") and which remain unchanged from the real dataset. This helps ensure clarity on which variables have been altered during the synthetic data generation process.
+
+For each dataset, we produce a table displaying the column names and whether the column is synthetic. A column is marked "Yes" if it was generated synthetically and "No" if it was retained from the real data.
+
+```{r Synthetic Data Identification and Column Names Table}
+
+# Function to create column info with dataset name
+create_column_info <- function(dataset, dataset_name) {
+  data.frame(
+    column_name = colnames(dataset),
+    dataset = dataset_name,
+    is_synthetic = ifelse(grepl("^synth_", colnames(dataset)), "Yes", "No"),
+    stringsAsFactors = FALSE
+  )
+}
+
+# Collect column info for all datasets
+all_column_info <- bind_rows(
+  create_column_info(syn_data_1, "Parametric MICE"),
+  create_column_info(syn_cart_1, "CART Imputation"),
+  create_column_info(syn_data_low_fidelity_synthpop, "Synthpop (Low Fidelity)"),
+  create_column_info(syn_data_metadata, "Metadata-Based")
+)
+
+# Reshape into wide format so variables appear once
+wide_column_info <- all_column_info %>%
+  pivot_wider(
+    names_from = dataset,
+    values_from = is_synthetic
+  )
+
+# Display the combined wide table
+kable(
+  wide_column_info,
+  caption = "Synthetic Indicators for Each Variable Across Datasets"
+)
+```
+
+## Synthetic Dataset Structure
+
+### Dataset Size and Structure Comparison
+
+This step evaluates whether the synthetic datasets match the real dataset in terms of the number of rows, columns, and feature types. Consistency in these dimensions is essential for the synthetic data to be a reliable stand-in for the real.
+
+- **Number of Rows**: Indicates if the synthetic data captures the same number of records as the real. Any mismatch can impact comparability.
+  
+- **Number of Columns**: Ensures all variables are retained. Missing or extra columns suggest structural issues.
+
+- **Feature Types**: Confirms that categorical, numerical, and other variable types remain unchanged, preserving analytical consistency.
+
+```{r Dataset Size and Structure Comparison}
+
+# Function to extract structure info
+get_structure_info <- function(real_data, synthetic_data, dataset_name) {
+  tibble(
+    Dataset = dataset_name,
+    Rows_Real = nrow(real_data),
+    Cols_Real = ncol(real_data),
+    Rows_Synthetic = nrow(synthetic_data),
+    Cols_Synthetic = ncol(synthetic_data),
+    Structure_Match = ifelse(
+      nrow(real_data) == nrow(synthetic_data) & ncol(real_data) == ncol(synthetic_data),
+      "✅ Yes", "❌ No"
+    )
+  )
+}
+
+# Collect results
+structure_comparison <- bind_rows(
+  get_structure_info(heart_failure, syn_data_1, "Parametric MICE"),
+  get_structure_info(heart_failure, syn_cart_1, "CART Imputation"),
+  get_structure_info(heart_failure, syn_data_low_fidelity_synthpop, "Synthpop (Low Fidelity)"),
+  get_structure_info(heart_failure, syn_data_metadata, "Metadata-Based")
+)
+
+# Display as a neat table
+kable(
+  structure_comparison,
+  caption = "Comparison of Real vs Synthetic Dataset Sizes and Structures"
+)
+```
+
+### Categorical Variables: All Levels Maintained and Comparison of Distribution
+
+This section evaluates how well the synthetic datasets replicate the categorical variables in the real dataset, focusing on the preservation of all levels and their distributions.
+
+- **Level Matching**: For each categorical variable, the synthetic dataset should retain all levels (categories) present in the real dataset. Missing levels suggest that the synthetic data may be incomplete, while additional levels could indicate errors in data generation.
+
+- **Distribution Comparison**: The frequency of each categorical level in the synthetic data should closely mirror that of the real dataset. Significant deviations in category frequencies suggest that the synthetic data does not fully capture the true distribution of the categorical features.
+
+```{r Categorical Variables: All Levels Maintained and Comparison of Distribution}
+
+# Function to collect categorical level info
+get_cat_levels <- function(real_data, synthetic_data, dataset_name) {
+  cat_vars <- colnames(real_data)[sapply(real_data, is.factor)]
+  
+  do.call(rbind, lapply(cat_vars, function(var) {
+    levels_real <- unique(real_data[[var]])
+    levels_synth <- unique(synthetic_data[[paste("synth", var, sep = "_")]])
+    
+    data.frame(
+      Variable = var,
+      Dataset = dataset_name,
+      Real_Levels = paste(levels_real, collapse = ", "),
+      Synthetic_Levels = paste(levels_synth, collapse = ", "),
+      Match = ifelse(all(levels_real %in% levels_synth), "✅ Yes", "❌ No"),
+      stringsAsFactors = FALSE
+    )
+  }))
+}
+
+# Collect results
+cat_comparison <- bind_rows(
+  get_cat_levels(heart_failure, syn_data_1, "Parametric MICE"),
+  get_cat_levels(heart_failure, syn_cart_1, "CART Imputation"),
+  get_cat_levels(heart_failure, syn_data_low_fidelity_synthpop, "Synthpop (Low Fidelity)"),
+  get_cat_levels(heart_failure, syn_data_metadata, "Metadata-Based")
+)
+
+# Display table
+kable(cat_comparison,
+      caption = "Comparison of Categorical Variable Levels in Real vs Synthetic Datasets")
+```
+
+### Numeric Variables: Range and Distribution Comparison
+
+This analysis evaluates how well the numeric variables in the synthetic datasets replicate the real data in terms of range and distribution.
+
+- **Range**: For each numeric variable, the synthetic data should maintain values within the range of the real dataset. Any deviations, especially outliers, could indicate inaccuracies in the synthetic generation process.
+  
+- **Distribution Comparison**: Density plots are used to compare the shape of the distributions between the real and synthetic datasets. Ideally, the synthetic data should closely mirror the real distribution, indicating that the underlying data generation model has captured the true variability of the numeric features.
+
+```{r Numeric Variables: Range and Distribution Comparison}
+
+# Helper: compute per-variable stats for a (real, synthetic) pair
+numeric_summary <- function(real, synth, dataset_name) {
+  num_vars <- names(real)[sapply(real, is.numeric)]
+  # real percentiles
+  pctl <- map(num_vars, ~quantile(real[[.x]], probs = c(.05, .95), na.rm = TRUE)) |>
+    setNames(num_vars)
+
+  tibble(
+    Variable = num_vars,
+    Real_Min = map_dbl(num_vars, ~min(real[[.x]], na.rm = TRUE)),
+    Real_P5  = map_dbl(num_vars, ~pctl[[.x]][1]),
+    Real_P95 = map_dbl(num_vars, ~pctl[[.x]][2]),
+    Real_Max = map_dbl(num_vars, ~max(real[[.x]], na.rm = TRUE)),
+    Synth_Min = map_dbl(num_vars, ~min(synth[[paste0("synth_", .x)]], na.rm = TRUE)),
+    Synth_Max = map_dbl(num_vars, ~max(synth[[paste0("synth_", .x)]], na.rm = TRUE))
+  ) |>
+    mutate(
+      Within_P5_P95 = ifelse(Synth_Min >= Real_P5 & Synth_Max <= Real_P95, "✅ Yes", "❌ No"),
+      Dataset = dataset_name,
+      .before = 1
+    )
+}
+
+# Build one continuous table for all synthetic datasets
+num_table <- bind_rows(
+  numeric_summary(heart_failure, syn_data_1, "Parametric MICE"),
+  numeric_summary(heart_failure, syn_cart_1, "CART Imputation"),
+  numeric_summary(heart_failure, syn_data_low_fidelity_synthpop, "Synthpop (Low Fidelity)"),
+  numeric_summary(heart_failure, syn_data_metadata, "Metadata-Based")
+)
+
+kable(
+  num_table,
+  caption = "Numeric variables: real ranges & percentiles vs. synthetic ranges (with P5–P95 containment check)"
+)
+```
+
+### Missingness Comparison
+
+In this section, we compare the proportions of missing values between the real dataset and each synthetic dataset. This comparison helps determine whether the synthetic datasets accurately represent the patterns of missingness in the real data.
+
+- **Missingness Proportions**: For each dataset, we calculate the proportion of missing values for every column and compare the results across the real and synthetic datasets.
+  
+- **Comparison Outcome**: Ideally, the synthetic datasets should exhibit similar missingness proportions to the real data. Any deviations may indicate differences in how missing values were handled during the synthetic data generation process.
+
+#### Introduction Plots
+
+```{r intro-plots, fig.width=10, fig.height=8, fig.align='center', out.width='100%'}
+
+# Custom palette for the 5 metrics
+metric_palette <- c(
+  "Discrete Columns"     = "#B0D99B",
+  "Continuous Columns"   = "#528AA8",
+  "All Missing Columns"  = "#FFB6DB",
+  "Complete Rows"        = "#264653",
+  "Missing Observations" = "#2A9D8F"
+)
+
+# Helper: strip 'synth_' for fair visuals
+strip_synth_prefix <- function(df) { 
+  names(df) <- sub("^synth_", "", names(df)) 
+  df 
+}
+
+# Datasets to compare
+datasets <- list(
+  "Real Data"               = heart_failure,
+  "Parametric MICE"         = strip_synth_prefix(syn_data_1),
+  "CART Imputation"         = strip_synth_prefix(syn_cart_1),
+  "Synthpop (Low Fidelity)" = strip_synth_prefix(syn_data_low_fidelity_synthpop),
+  "Metadata-Based"          = strip_synth_prefix(syn_data_metadata)
+)
+
+# Function: horizontal bar chart for the 5 metrics
+make_intro_plot <- function(df, title) {
+  n_rows <- nrow(df)
+  n_cols <- ncol(df)
+
+  pct_discrete   <- 100 * sum(vapply(df, is.factor,  logical(1))) / n_cols
+  pct_continuous <- 100 * sum(vapply(df, is.numeric, logical(1))) / n_cols
+  pct_allmisscol <- 100 * sum(colSums(is.na(df)) == n_rows) / n_cols
+  pct_completer  <- 100 * sum(complete.cases(df)) / n_rows
+  pct_missobs    <- 100 * sum(is.na(df)) / (n_rows * n_cols)
+
+  plot_df <- tibble::tibble(
+    Metric = factor(
+      c("Discrete Columns", "Continuous Columns", "All Missing Columns",
+        "Complete Rows", "Missing Observations"),
+      levels = rev(c("Discrete Columns", "Continuous Columns", "All Missing Columns",
+                     "Complete Rows", "Missing Observations")) # reverse for nicer order
+    ),
+    Percentage = c(pct_discrete, pct_continuous, pct_allmisscol, pct_completer, pct_missobs)
+  )
+
+  ggplot(plot_df, aes(x = Percentage, y = Metric, fill = Metric)) +
+    geom_col(alpha = 0.9, show.legend = FALSE) +
+    geom_text(aes(label = paste0(round(Percentage, 1), "%")),
+              hjust = -0.1, size = 3.5) +
+    scale_x_continuous(
+      labels = scales::percent_format(scale = 1),
+      limits = c(0, 100),
+      expand = expansion(mult = c(0, 0.05)) # headroom for labels
+    ) +
+    scale_fill_manual(values = metric_palette) +
+    labs(title = title, x = "Percentage", y = NULL) +
+    theme_light() +
+    theme(
+      axis.text.y  = element_text(size = 9),
+      plot.title   = element_text(face = "bold")
+    )
+}
+
+# Build plots and combine in one grid
+wrap_plots(
+  imap(datasets, ~ make_intro_plot(.x, .y)),
+  ncol = 2
+) +
+  plot_annotation(
+    title = "Dataset Overview: Discrete/Continuous Columns, All-Missing Columns, Complete Rows, Missing Observations",
+    subtitle = "Percentages shown per dataset; axes standardized to 0–100%",
+    theme = theme(plot.title = element_text(face = "bold", size = 12))
+  )
+```
+
+#### Missingness Proportions and Comparison Outcome
+
+```{r Missingness Proportions and Comparison Outcome}
+
+# Helper: remove 'synth_' prefix so names match the real dataset
+strip_synth_prefix <- function(df) {
+  names(df) <- sub("^synth_", "", names(df))
+  df
+}
+
+# Compare against the real dataset's variable set
+core_vars <- names(heart_failure)
+
+# Function to compute missingness proportions (2 d.p.) for one dataset
+get_missingness <- function(df, label) {
+  df2 <- df %>% strip_synth_prefix()
+  # keep only variables present in the real data (prevents mismatches)
+  df2 <- df2 %>% select(any_of(core_vars))
+  tibble(
+    Variable   = names(df2),
+    Proportion = round(colSums(is.na(df2)) / nrow(df2), 2),
+    Dataset    = label
+  )
+}
+
+# Build tidy table
+missing_tbl <- bind_rows(
+  get_missingness(heart_failure, "Real Data"),
+  get_missingness(syn_data_1, "Parametric MICE"),
+  get_missingness(syn_cart_1, "CART Imputation"),
+  get_missingness(syn_data_low_fidelity_synthpop, "Synthpop (Low Fidelity)"),
+  get_missingness(syn_data_metadata, "Metadata-Based")
+)
+
+# Pivot wider for side-by-side comparison
+missing_tbl_wide <- missing_tbl %>%
+  pivot_wider(names_from = Dataset, values_from = Proportion) %>%
+  arrange(Variable)
+
+# Optional: add quick match flags (✅ if identical to Real Data)
+# missing_tbl_wide <- missing_tbl_wide %>%
+#   mutate(
+#     `Parametric MICE Match` = ifelse(`Parametric MICE` == `Real Data`, "✅", "❌"),
+#     `CART Imputation Match` = ifelse(`CART Imputation` == `Real Data`, "✅", "❌"),
+#     `Synthpop (Low Fidelity) Match` = ifelse(`Synthpop (Low Fidelity)` == `Real Data`, "✅", "❌"),
+#     `Metadata-Based Match` = ifelse(`Metadata-Based` == `Real Data`, "✅", "❌")
+#   )
+
+kable(
+  missing_tbl_wide,
+  caption = "Missingness Proportions by Variable (rounded to 2 d.p.)"
+)
+```
+
+#### Missingness Maps
+
+```{r Missingness Maps, fig.width=14, fig.height=6, fig.align='center', out.width='100%'}
+
+# Generate missingness map for the real dataset
+real_missing_map <- aggr(heart_failure, col = c("#B0D99B", "#528AA8"),
+                             numbers = TRUE, sortVars = TRUE,
+                             labels = names(heart_failure), cex.axis = .7,
+                             gap = 3, ylab = c("Missing Data", "Pattern - real Dataset"))
+
+# Generate missingness map for Parametric MICE synthetic dataset
+parametric_mice_missing_map <- aggr(syn_data_1, col = c("#B0D99B", "#528AA8"),
+                                    numbers = TRUE, sortVars = TRUE,
+                                    labels = names(syn_data_1), cex.axis = .7,
+                                    gap = 3, ylab = c("Missing Data", "Pattern - Parametric MICE Dataset"))
+
+# Generate missingness map for CART synthetic dataset
+cart_missing_map <- aggr(syn_cart_1, col = c("#B0D99B", "#528AA8"),
+                         numbers = TRUE, sortVars = TRUE,
+                         labels = names(syn_cart_1), cex.axis = .7,
+                         gap = 3, ylab = c("Missing Data", "Pattern - CART Dataset"))
+
+# Generate missingness map for Synthpop synthetic dataset
+synthpop_missing_map <- aggr(syn_data_low_fidelity_synthpop, col = c("#B0D99B", "#528AA8"),
+                             numbers = TRUE, sortVars = TRUE,
+                             labels = names(syn_data_low_fidelity_synthpop), cex.axis = .7,
+                             gap = 3, ylab = c("Missing Data", "Pattern - Synthpop Dataset"))
+
+# Generate missingness map for Metadata-based synthetic dataset
+metadata_missing_map <- aggr(syn_data_metadata, col = c("#B0D99B", "#528AA8"),
+                             numbers = TRUE, sortVars = TRUE,
+                             labels = names(syn_data_metadata), cex.axis = .7,
+                             gap = 3, ylab = c("Missing Data", "Pattern - Metadata-Based Dataset"))
+```
+
+### Correlation Matrices Comparison
+
+In this section, we assess how well the correlations between numeric variables are preserved in the synthetic datasets compared to the real dataset. By comparing the correlation matrices, we evaluate whether the relationships between variables in the real data are reflected in the synthetic versions. This assessment is essential because maintaining the real data's correlation structure ensures that any statistical or machine learning models trained on synthetic data will behave similarly to those trained on real data.
+
+- **Correlation Matrix**: A correlation matrix quantifies the strength and direction of relationships between pairs of numeric variables. Each cell in the matrix represents the correlation coefficient between two variables, which can range from -1 (perfect negative correlation) to +1 (perfect positive correlation). It is crucial that synthetic data retains these relationships to ensure that any analyses based on these dependencies remain valid.
+
+- **Comparison Process**: The correlation matrices for both the real and synthetic datasets are computed and Visualised. Ideally, the structure and strength of correlations in the synthetic datasets should closely match those in the real dataset. Differences in correlation strength or direction indicate that the synthetic data may not fully capture the underlying relationships, which can affect the validity of any conclusions drawn from analyses using the synthetic data.
+
+Maintaining similar correlation structures is particularly important for use cases where relationships between variables play a crucial role, such as in predictive modeling, feature selection, and understanding variable dependencies. The following sections outline different methods used to compare correlation matrices between the real and synthetic datasets.
+
+#### Correlation Matrices Comparison using psych
+
+The `psych` package provides tools for analyzing and visualizing correlation matrices. The `corr.test()` function is particularly useful for computing correlation coefficients while handling missing data and providing additional statistics, such as confidence intervals.
+
+```{r correlation-matrices-comparison-table}
+
+# Helper: strip 'synth_' so names line up with real
+strip_synth_prefix <- function(df) {
+  names(df) <- sub("^synth_", "", names(df))
+  df
+}
+
+# Build a tidy table of pairwise correlations for real vs one synthetic dataset
+corr_compare_one <- function(real, synth, label) {
+  real_num  <- real |> select(where(is.numeric))
+  synth_num <- synth |> strip_synth_prefix() |> select(where(is.numeric))
+
+  common <- intersect(names(real_num), names(synth_num))
+  if (length(common) < 2) {
+    return(tibble(Dataset = label, Var1 = character(), Var2 = character(),
+                  Real = numeric(), Synthetic = numeric(), Diff = numeric(), AbsDiff = numeric()))
+  }
+
+  # Compute Pearson correlations with pairwise complete observations
+  rc <- cor(real_num[common],  use = "pairwise.complete.obs", method = "pearson")
+  sc <- cor(synth_num[common], use = "pairwise.complete.obs", method = "pearson")
+
+  # Keep only upper triangle (unique pairs)
+  ut <- upper.tri(rc, diag = FALSE)
+  pairs <- which(ut, arr.ind = TRUE)
+  tibble(
+    Var1 = colnames(rc)[pairs[, 1]],
+    Var2 = colnames(rc)[pairs[, 2]],
+    Real = rc[pairs],
+    Synthetic = sc[pairs]
+  ) |>
+    mutate(
+      Dataset = label,
+      Diff = Synthetic - Real,
+      AbsDiff = abs(Diff)
+    ) |>
+    select(Dataset, Var1, Var2, Real, Synthetic, Diff, AbsDiff)
+}
+
+# Build one combined table for all synthetic datasets
+corr_cmp_tbl <- bind_rows(
+  corr_compare_one(heart_failure, syn_data_1, "Parametric MICE"),
+  corr_compare_one(heart_failure, syn_cart_1, "CART Imputation"),
+  corr_compare_one(heart_failure, syn_data_low_fidelity_synthpop, "Synthpop (Low Fidelity)"),
+  corr_compare_one(heart_failure, syn_data_metadata, "Metadata-Based")
+) |>
+  arrange(Dataset, desc(AbsDiff)) |>
+  mutate(
+    Real = round(Real, 2),
+    Synthetic = round(Synthetic, 2),
+    Diff = round(Diff, 2),
+    AbsDiff = round(AbsDiff, 2)
+  )
+
+knitr::kable(
+  corr_cmp_tbl,
+  caption = "Pairwise Correlations: Real vs. Synthetic (sorted by largest absolute difference per dataset)",
+  align = "lllrrrr"
+)
+```
+
+#### Correlation Matrices Comparison using Corrplot
+
+The `corrplot` package is widely used for visualizing correlation matrices. It provides a variety of options for customization, making it easy to identify patterns and relationships between variables. This method is particularly effective for visual comparisons because it highlights differences in correlation strength and direction.
+
+```{r Correlation Matrices Comparison using Corrplot, fig.width=14, fig.height=6, fig.align='center', out.width='100%'}
+
+# Helper: remove 'synth_' so names match the real dataset
+strip_synth_prefix <- function(df) { names(df) <- sub("^synth_", "", names(df)); df }
+
+# Side-by-side correlation matrices (full width)
+compare_correlation_matrices <- function(real_data, synthetic_data, dataset_name) {
+  # Numeric-only
+  real_num  <- real_data[sapply(real_data, is.numeric)]
+  synth_num <- strip_synth_prefix(synthetic_data)[sapply(strip_synth_prefix(synthetic_data), is.numeric)]
+
+  # Use common numeric variables in same order
+  common <- intersect(names(real_num), names(synth_num))
+  if (length(common) < 2) {
+    message(dataset_name, ": fewer than 2 common numeric columns — skipping.")
+    return(invisible(NULL))
+  }
+  real_corr  <- cor(real_num[common],  use = "complete.obs")
+  synth_corr <- cor(synth_num[common], use = "complete.obs")
+
+  # Make two panels across the page
+  op <- par(no.readonly = TRUE); on.exit(par(op), add = TRUE)
+  par(mfrow = c(1, 2), mar = c(4, 4, 4, 2))
+
+  corrplot(real_corr,  tl.cex = 0.8, mar = c(0,0,2,0))
+  title(paste(dataset_name, "- Real Data"), line = 1)
+
+  corrplot(synth_corr, tl.cex = 0.8, mar = c(0,0,2,0))
+  title(paste(dataset_name, "- Synthetic Data"), line = 1)
+}
+
+# Run for each synthetic dataset
+compare_correlation_matrices(heart_failure, syn_data_1, "Parametric MICE")
+compare_correlation_matrices(heart_failure, syn_cart_1, "CART Imputation")
+compare_correlation_matrices(heart_failure, syn_data_low_fidelity_synthpop, "Synthpop (Low Fidelity)")
+compare_correlation_matrices(heart_failure, syn_data_metadata, "Metadata-Based")
+```
+
+#### Correlation Matrices Comparison using GGally
+
+The `GGally` package extends `ggplot2` to create pairwise visualizations, including correlation matrix plots. Using `ggpairs()`, you can generate a matrix of scatterplots, histograms, and correlation coefficients, which provides a detailed view of the relationships between numeric variables in the real and synthetic datasets.
+
+```{r Correlation Matrices Comparison using GGally, fig.width=11, fig.height=11, fig.align='center', out.width='100%'}
+
+compare_correlation_matrices_ggally <- function(real_data, synthetic_data, dataset_name) {
+
+  # Select only numeric columns from both datasets
+  real_numeric <- real_data %>% select(where(is.numeric))
+
+  # Remove prefix 'synth_' from synthetic data column names
+  names(synthetic_data) <- gsub("^synth_", "", names(synthetic_data))
+  synthetic_numeric <- synthetic_data %>% select(where(is.numeric))
+
+  # Ensure that both datasets have the same columns
+  common_columns <- intersect(names(real_numeric), names(synthetic_numeric))
+  
+  if (length(common_columns) == 0) {
+    cat("\nNo common numeric columns found for comparison in", dataset_name, "\n")
+    return()
+  }
+
+  real_numeric <- real_numeric[, common_columns, drop = FALSE]
+  synthetic_numeric <- synthetic_numeric[, common_columns, drop = FALSE]
+
+  # Add a column to differentiate between real and synthetic data
+  real_numeric$Dataset <- "Real"
+  synthetic_numeric$Dataset <- "Synth"
+
+  # Combine the datasets
+  combined_data <- rbind(real_numeric, synthetic_numeric)
+
+  # Create correlation matrix plot using GGally if there are valid columns to plot
+  if (ncol(combined_data) > 1) {
+    p <- ggpairs(
+      combined_data, 
+      aes(color = Dataset, alpha = 0.5), 
+      title = paste(dataset_name, "- Correlation Matrix Comparison"),
+      columns = 1:(ncol(combined_data) - 1),  # Exclude the 'Dataset' column from the plot
+      upper = list(continuous = wrap("cor", size = 3, alignPercent = 0.5)),  # Smaller correlation labels
+      lower = list(continuous = wrap("smooth", alpha = 0.4, size = 0.5)),  # Smoother plots for readability
+      diag = list(continuous = wrap("densityDiag", alpha = 0.5))  # Density plot with improved transparency
+    ) +
+      theme_minimal() +  # Use a cleaner theme
+      theme(
+        strip.text = element_text(size = 8, face = "bold"),  # Smaller strip labels
+        axis.text.x = element_text(angle = 45, hjust = 1, size = 7),  # Rotate x-axis labels for better readability
+        axis.text.y = element_text(size = 7),
+        legend.position = "top",  # Move legend to a better location
+        legend.title = element_blank()  # Remove unnecessary legend title
+      )
+    print(p)
+  } else {
+    cat("\nNot enough numeric columns to generate a correlation matrix plot for", dataset_name, "\n")
+  }
+}
+
+# Apply the function to each synthetic dataset
+compare_correlation_matrices_ggally(heart_failure, syn_data_1, "Parametric MICE")
+compare_correlation_matrices_ggally(heart_failure, syn_cart_1, "CART Imputation")
+compare_correlation_matrices_ggally(heart_failure, syn_data_low_fidelity_synthpop, "Synthpop Low Fidelity")
+compare_correlation_matrices_ggally(heart_failure, syn_data_metadata, "Metadata-Based Synthetic Data")
+```
+
+## Fidelity Assessment
+
+### Descriptive Statistics
+
+This section provides a comparative analysis of the descriptive statistics between the real dataset and the synthetic datasets generated using different methods.
+
+#### Real Dataset
+
+The descriptive statistics for the real heart failure dataset include metrics such as mean, median, standard deviation, and range. This serves as the baseline for comparison with the synthetic datasets.
+
+```{r Descriptive statistics for for the Real Dataset}
+
+# Generate descriptive stats
+desc_tbl <- describe(heart_failure) %>%
+  as.data.frame() %>%
+  select(n, mean, sd, min, median, max) %>%
+  round(2) %>%
+  tibble::rownames_to_column("Variable")
+
+# Display as a neat table
+kable(
+  desc_tbl,
+  caption = "Descriptive Statistics for the Heart Failure Dataset",
+  align = "lrrrrrr"
+)
+```
+
+#### Parametric Imputation (MICE)
+
+The synthetic data generated using the MICE framework is analyzed to compare its summary statistics with the real dataset. This will help evaluate how well the parametric method captures the key characteristics of the data.
+
+```{r Descriptive statistics for parametric MICE dataset}
+
+# Descriptive stats for Parametric MICE synthetic dataset
+desc_mice <- describe(syn_data_1) %>%
+  as.data.frame() %>%
+  select(n, mean, sd, min, median, max) %>%
+  round(2) %>%
+  tibble::rownames_to_column("Variable")
+
+# Display table
+kable(
+  desc_mice,
+  caption = "Descriptive Statistics for Parametric MICE Synthetic Dataset",
+  align = "lrrrrrr"
+)
+```
+
+#### Non-Parametric Imputation (CART)
+
+The CART method is a non-parametric technique that handles non-linear relationships. The descriptive statistics of the CART-imputed synthetic data provide insight into how this method captures the dataset's distribution.
+
+```{r Descriptive statistics for non-parametric CART dataset}
+
+# Descriptive stats for CART synthetic dataset
+desc_cart <- describe(syn_cart_1) %>%
+  as.data.frame() %>%
+  select(n, mean, sd, min, median, max) %>%
+  round(2) %>%
+  tibble::rownames_to_column("Variable")
+
+# Display table
+kable(
+  desc_cart,
+  caption = "Descriptive Statistics for CART Synthetic Dataset",
+  align = "lrrrrrr"
+)
+```
+
+#### Synthpop-Based Synthetic Data
+
+The Synthpop package generates synthetic data aimed at preserving data privacy. Descriptive statistics for this dataset help assess how well the key attributes of the real data are preserved.
+
+```{r Descriptive statistics for the synthpop dataset}
+
+# Descriptive stats for Synthpop synthetic dataset
+desc_synthpop <- describe(syn_data_low_fidelity_synthpop) %>%
+  as.data.frame() %>%
+  select(n, mean, sd, min, median, max) %>%
+  round(2) %>%
+  tibble::rownames_to_column("Variable")
+
+# Display as a clean table
+kable(
+  desc_synthpop,
+  caption = "Descriptive Statistics for Synthpop Synthetic Dataset",
+  align = "lrrrrrr"
+)
+```
+
+#### Metadata-Based Synthetic Data
+
+The synthetic data generated using metadata ensures that variable structures conform to the data dictionary. The summary statistics here show how well the dataset reflects the real's attributes based on predefined metadata.
+
+```{r Descriptive statistics for syn_data_metadata}
+
+# Descriptive stats for Metadata-Based synthetic dataset
+desc_metadata <- describe(syn_data_metadata) %>%
+  as.data.frame() %>%
+  select(n, mean, sd, min, median, max) %>%
+  round(2) %>%
+  tibble::rownames_to_column("Variable")
+
+# Display as a clean table
+kable(
+  desc_metadata,
+  caption = "Descriptive Statistics for Metadata-Based Synthetic Dataset",
+  align = "lrrrrrr"
+)
+```
+
+By comparing the descriptive statistics, you can evaluate how closely the synthetic datasets resemble the real dataset across key summary metrics. This is a critical step in assessing the quality and usability of synthetic data.
+Histogram Similarity Score
+### Variable Exploration
+
+#### Parametric Imputation (MICE)
+
+The parametric imputation using the MICE framework generates synthetic data by imputing missing values based on multivariate normal distributions.
+
+##### Bar Plots for Categorical Variables
+
+To evaluate the preservation of categorical variable distributions in the synthetic data, we generate bar plots comparing the proportions of categorical variables between the real and synthetic datasets.
+
+```{r Bar Plots for Categorical Variables, fig.width=14, fig.height=6, fig.align='center', out.width='100%'}
+
+# Combine real and parametric MICE synthetic datasets
+heart_failure$dataset <- "real"
+syn_data_1$dataset <- "synthetic"
+
+# Adjust the column names for synthetic data by removing the 'synth_' prefix
+colnames(syn_data_1) <- gsub("synth_", "", colnames(syn_data_1))
+
+# Combine both datasets (real and synthetic)
+combined_data_param <- bind_rows(heart_failure, syn_data_1)
+
+# Bar plots for categorical variables
+bar_plots <- colnames(heart_failure)[map_lgl(heart_failure, is.factor)] %>%
+  map(~ ggplot(combined_data_param, aes_string(.x, fill = 'dataset', group = 'dataset')) +
+        geom_bar(aes(y = ..prop..), position = position_dodge2(), stat = "count") +
+        scale_fill_manual(values = c("real" = "#B0D99B", "synthetic" = "#528AA8")) +
+        labs(x = .x, y = "Proportion")) %>%
+  patchwork::wrap_plots() +
+  plot_annotation(title = "Comparison of Categorical Variables Between real and Synthetic Datasets",
+                  theme = theme(plot.title = element_text(hjust = 0.5)))
+
+# Print the combined plot with one main title
+print(bar_plots)
+```
+
+##### Density Plots for Numeric Variables
+
+The density plots illustrate the distribution of numeric variables between the real dataset and the parametric MICE synthetic data. The goal is to ensure that the synthetic data closely follows the real data’s numeric distribution.
+
+```{r Density plots for numeric variables (parametric imputed data), fig.width=14, fig.height=10, fig.align='center', out.width='100%'}
+
+# Density plots for numeric variables (parametric imputed data)
+density_plots_param <- colnames(heart_failure)[map_lgl(heart_failure, is.numeric)] %>%
+  map(~ ggplot(combined_data_param, aes_string(.x, fill = 'dataset', group = 'dataset')) +
+        geom_density(alpha = 0.5) +
+        scale_fill_manual(values = c("real" = "#B0D99B", "synthetic" = "#528AA8")) +
+        labs(x = .x, y = "Density")) %>%
+  patchwork::wrap_plots(ncol = 2) +  # Arrange plots in 2 columns
+  plot_annotation(title = "Comparison of Numeric Variables Between real and Parametric Synthetic Data",
+                  theme = theme(plot.title = element_text(hjust = 0.5)))
+
+# Print the combined density plots with one main title
+print(density_plots_param)
+```
+
+#### Non-Parametric Imputation (CART)
+
+CART is a non-parametric approach for generating synthetic data that captures complex relationships between variables without making distributional assumptions.
+
+##### Bar Plots for Categorical Variables
+
+The bar plots compare the distribution of categorical variables in the real and synthetic datasets generated using the CART method.
+
+```{r Bar plots for categorical variables (CART-imputed data), fig.width=14, fig.height=6, fig.align='center', out.width='100%'}
+
+# Combine real and non-parametric CART synthetic datasets
+syn_cart_1$dataset <- "synthetic"
+
+# Adjust the column names for synthetic data by removing the 'synth_' prefix
+colnames(syn_cart_1) <- gsub("synth_", "", colnames(syn_cart_1))
+
+# Combine both datasets (real and synthetic)
+combined_data_cart <- bind_rows(heart_failure, syn_cart_1)
+
+# Bar plots for categorical variables (CART-imputed data)
+bar_plots_cart <- colnames(heart_failure)[map_lgl(heart_failure, is.factor)] %>%
+  map(~ ggplot(combined_data_cart, aes_string(.x, fill = 'dataset', group = 'dataset')) +
+        geom_bar(aes(y = ..prop..), position = position_dodge2(), stat = "count") +
+        scale_fill_manual(values = c("real" = "#B0D99B", "synthetic" = "#528AA8")) +
+        labs(x = .x, y = "Proportion")) %>%
+  patchwork::wrap_plots() +
+  plot_annotation(title = "Comparison of Categorical Variables Between real and Synthetic Data",
+                  theme = theme(plot.title = element_text(hjust = 0.5)))
+
+# Print the combined plot with one main title
+print(bar_plots_cart)
+```
+
+##### Density Plots for Numeric Variables
+
+The density plots display how well the numeric variables in the CART-imputed synthetic data align with the real dataset.
+
+```{r Density plots for numeric variables (CART-imputed data), fig.width=14, fig.height=10, fig.align='center', out.width='100%'}
+
+# Density plots for numeric variables (CART-imputed data)
+density_plots_cart <- colnames(heart_failure)[map_lgl(heart_failure, is.numeric)] %>%
+  map(~ ggplot(combined_data_cart, aes_string(.x, fill = 'dataset', group = 'dataset')) +
+        geom_density(alpha = 0.5) +
+        scale_fill_manual(values = c("real" = "#B0D99B", "synthetic" = "#528AA8")) +
+        labs(x = .x, y = "Density")) %>%
+  patchwork::wrap_plots(ncol = 2) +  # Arrange plots in 2 columns
+  plot_annotation(title = "Comparison of Numeric Variables Between real and Synthetic Data",
+                  theme = theme(plot.title = element_text(hjust = 0.5)))
+
+# Print the combined density plots with one main title
+print(density_plots_cart)
+```
+
+#### Synthpop-Based Synthetic Data
+
+Synthpop is used to generate synthetic datasets that closely follow the distributions of the real data for privacy-preserving data sharing.
+
+##### Bar Plots for Categorical Variables
+
+These bar plots assess how well Synthpop-based synthetic data maintains the categorical distributions of the real dataset.
+
+```{r Bar plots for categorical variables (Synthpop-based synthetic data), fig.width=14, fig.height=6, fig.align='center', out.width='100%'}
+
+# Combine real and Synthpop-based synthetic datasets
+heart_failure$dataset <- "real"
+syn_data_low_fidelity_synthpop$dataset <- "synthetic"
+
+# Adjust the column names for synthetic data by removing the 'synth_' prefix
+colnames(syn_data_low_fidelity_synthpop) <- gsub("synth_", "", colnames(syn_data_low_fidelity_synthpop))
+
+# Combine both datasets (real and synthetic)
+combined_data_synthpop <- bind_rows(heart_failure, syn_data_low_fidelity_synthpop)
+
+# Bar plots for categorical variables (Synthpop-based synthetic data)
+bar_plots_synthpop <- colnames(heart_failure)[map_lgl(heart_failure, is.factor)] %>%
+  map(~ ggplot(combined_data_synthpop, aes_string(.x, fill = 'dataset', group = 'dataset')) +
+        geom_bar(aes(y = ..prop..), position = position_dodge2(), stat = "count") +
+        scale_fill_manual(values = c("real" = "#B0D99B", "synthetic" = "#528AA8")) +
+        labs(x = .x, y = "Proportion")) %>%
+  patchwork::wrap_plots() +
+  plot_annotation(title = "Comparison of Categorical Variables Between real and Synthetic Data",
+                  theme = theme(plot.title = element_text(hjust = 0.5)))
+
+# Print the combined plot with one main title
+print(bar_plots_synthpop)
+```
+
+##### Density Plots for Numeric Variables
+
+The density plots illustrate how closely Synthpop-based synthetic data matches the real dataset for numeric variables.
+
+```{r Density plots for numeric variables (Synthpop-based synthetic data), fig.width=14, fig.height=10, fig.align='center', out.width='100%'}
+
+# Combine real and Synthpop-based synthetic datasets
+heart_failure$dataset <- "real"
+syn_data_low_fidelity_synthpop$dataset <- "synthetic"
+combined_data_synthpop <- bind_rows(heart_failure, syn_data_low_fidelity_synthpop)
+
+# Density plots for numeric variables (Synthpop-based synthetic data)
+density_plots_synthpop <- colnames(heart_failure)[map_lgl(heart_failure, is.numeric)] %>%
+  map(~ ggplot(combined_data_synthpop, aes_string(.x, fill = 'dataset', group = 'dataset')) +
+        geom_density(alpha = 0.5) +
+        scale_fill_manual(values = c("real" = "#B0D99B", "synthetic" = "#528AA8")) +
+        labs(x = .x, y = "Density")) %>%
+  patchwork::wrap_plots(ncol = 2) +  # Arrange plots in 2 columns
+  plot_annotation(title = "Comparison of Numeric Variables Between real and Synthetic Data",
+                  theme = theme(plot.title = element_text(hjust = 0.5)))
+
+# Print the combined density plots with one main title
+print(density_plots_synthpop)
+```
+
+#### Metadata-Based Synthetic Data
+
+Metadata-based synthetic data generation uses a predefined data dictionary to ensure that the synthetic data follows the correct structure and distribution.
+
+##### Bar Plots for Categorical Variables
+
+We compare the categorical variables of the real and metadata-based synthetic datasets to assess distributional alignment.
+
+```{r Bar plots for categorical variables (Metadata-based synthetic data), fig.width=14, fig.height=6, fig.align='center', out.width='100%'}
+
+# Combine real and Metadata-based synthetic datasets
+heart_failure$dataset <- "real"
+syn_data_metadata$dataset <- "synthetic"
+
+# Adjust the column names for synthetic data by removing the 'synth_' prefix
+colnames(syn_data_metadata) <- gsub("synth_", "", colnames(syn_data_metadata))
+
+# Combine both datasets (real and synthetic)
+combined_data_metadata <- bind_rows(heart_failure, syn_data_metadata)
+
+# Bar plots for categorical variables (Metadata-based synthetic data)
+bar_plots_metadata <- colnames(heart_failure)[map_lgl(heart_failure, is.factor)] %>%
+  map(~ ggplot(combined_data_metadata, aes_string(.x, fill = 'dataset', group = 'dataset')) +
+        geom_bar(aes(y = ..prop..), position = position_dodge2(), stat = "count") +
+        scale_fill_manual(values = c("real" = "#B0D99B", "synthetic" = "#528AA8")) +
+        labs(x = .x, y = "Proportion")) %>%
+  patchwork::wrap_plots() +
+  plot_annotation(title = "Comparison of Categorical Variables Between real and Synthetic Datasets",
+                  theme = theme(plot.title = element_text(hjust = 0.5)))
+
+# Print the combined plot with one main title
+print(bar_plots_metadata)
+```
+
+##### Density Plots for Numeric Variables
+
+The density plots for numeric variables compare the distribution of numeric values between the real and metadata-based synthetic datasets.
+
+```{r Density Plots for Numeric Variables, fig.width=14, fig.height=10, fig.align='center', out.width='100%'}
+
+# Combine real and Metadata-based synthetic datasets
+heart_failure$dataset <- "real"
+syn_data_metadata$dataset <- "synthetic"
+combined_data_metadata <- bind_rows(heart_failure, syn_data_metadata)
+
+# Density plots for numeric variables (Metadata-based synthetic data)
+density_plots_metadata <- colnames(heart_failure)[map_lgl(heart_failure, is.numeric)] %>%
+  map(~ ggplot(combined_data_metadata, aes_string(.x, fill = 'dataset', group = 'dataset')) +
+        geom_density(alpha = 0.5) +
+        scale_fill_manual(values = c("real" = "#B0D99B", "synthetic" = "#528AA8")) +
+        labs(x = .x, y = "Density")) %>%
+  patchwork::wrap_plots(ncol = 2) +  # Arrange plots in 2 columns
+  plot_annotation(title = "Comparison of Numeric Variables Between real and Synthetic Data",
+                  theme = theme(plot.title = element_text(hjust = 0.5)))
+
+# Print the combined density plots with one main title
+print(density_plots_metadata)
+```
+
+### Histogram Similarity Score
+
+The Histogram Similarity Score measures how closely the marginal distributions of the synthetic data match the real data. Marginal distributions are critical for assessing whether key data characteristics such as spread, central tendency (mean/median), and shape (skewness/kurtosis) are preserved.
+
+Ideal Ranges for Histogram Similarity:
+
+- **Perfect Match:** 1 (100%) indicates a perfect match between the distributions.
+- **Good Match:** 0.85–1 (85% to 100%) shows strong similarity.
+- **Moderate Match:** 0.65–0.85 suggests some differences that may need addressing.
+- **Poor Match:** Below 0.65 indicates significant deviation from the real data.
+
+```{r histogram-similarity-score, fig.width=10, fig.height=4, fig.align='center', out.width='100%'}
+# Custom palette for datasets
+dataset_palette <- c(
+  "Parametric MICE"       = "#B0D99B",
+  "CART Imputation"       = "#528AA8",
+  "Synthpop (Low Fidelity)" = "#FFB6DB",
+  "Metadata-Based"        = "#264653"
+)
+
+# Define function once
+calculate_histogram_similarity <- function(real_data, synthetic_data) {
+  real_numeric <- real_data[sapply(real_data, is.numeric)]
+  synthetic_numeric <- synthetic_data[sapply(synthetic_data, is.numeric)]
+  
+  similarity_scores <- sapply(names(real_numeric), function(var) {
+    real_hist <- hist(real_numeric[[var]], plot = FALSE)
+    synthetic_hist <- hist(synthetic_numeric[[var]], plot = FALSE)
+    
+    # Wasserstein distance between histogram midpoints
+    wasserstein_distance <- transport::wasserstein1d(real_hist$mids, synthetic_hist$mids)
+    1 / (1 + wasserstein_distance)  # similarity score
+  })
+  
+  mean(similarity_scores)
+}
+
+# Collect results in a tibble (convert to percentages)
+hist_sim_tbl <- tibble::tibble(
+  Dataset = c("Parametric MICE", "CART Imputation", "Synthpop (Low Fidelity)", "Metadata-Based"),
+  Histogram_Similarity = c(
+    calculate_histogram_similarity(heart_failure, syn_data_1),
+    calculate_histogram_similarity(heart_failure, syn_cart_1),
+    calculate_histogram_similarity(heart_failure, syn_data_low_fidelity_synthpop),
+    calculate_histogram_similarity(heart_failure, syn_data_metadata)
+  )
+) %>%
+  mutate(Histogram_Similarity = round(Histogram_Similarity * 100, 1))  # percentage
+
+# Display as table
+kable(
+  hist_sim_tbl,
+  caption = "Histogram Similarity Scores (%): higher = more similar to real data",
+  align = "lr"
+)
+
+# Horizontal bar chart with custom colours
+ggplot(hist_sim_tbl, aes(y = Dataset, x = Histogram_Similarity, fill = Dataset)) +
+  geom_col(alpha = 0.9, show.legend = FALSE) +
+  geom_text(aes(label = paste0(Histogram_Similarity, "%")), 
+            hjust = -0.1, size = 3.3) +
+  scale_fill_manual(values = dataset_palette) +
+  scale_x_continuous(labels = scales::percent_format(scale = 1), limits = c(0, 100)) +
+  labs(
+    title = "Histogram Similarity by Synthetic Method",
+    subtitle = "Based on Wasserstein distance of variable histograms",
+    x = "Similarity (%)", y = NULL
+  ) +
+  theme_minimal() +
+  theme(axis.text.y = element_text(size = 10))
+```
+
+### Mutual Information Score
+
+The Mutual Information (MI) Score measures the shared information between pairs of features in the real and synthetic datasets, assessing how well relationships between variables are preserved.
+
+Ideal Ranges for Mutual Information:
+
+- **Perfect Alignment:** MI scores for synthetic data should ideally match the real within 10-20% for critical feature pairs.
+- **Lower MI:** Consistently lower MI scores suggest that noise has been added, weakening relationships.
+- **Overfitting Risk:** Higher MI scores than the real may indicate overfitting, increasing re-identification risk.
+
+```{r mutual-information-score, fig.width=10, fig.height=4, fig.align='center', out.width='100%'}
+
+# Custom palette for datasets
+dataset_palette <- c(
+  "Parametric MICE"         = "#B0D99B",
+  "CART Imputation"         = "#528AA8",
+  "Synthpop (Low Fidelity)" = "#FFB6DB",
+  "Metadata-Based"          = "#264653"
+)
+
+# ------- Helpers -------
+# Strip 'synth_' so variable names align with the real dataset
+strip_synth_prefix <- function(df) {
+  names(df) <- sub("^synth_", "", names(df))
+  df
+}
+
+# Compute pairwise MI matrix for a data.frame of discretized columns
+compute_mi_matrix <- function(df_disc) {
+  p <- ncol(df_disc)
+  if (p < 2) return(matrix(numeric(0), nrow = p, ncol = p,
+                           dimnames = list(colnames(df_disc), colnames(df_disc))))
+  M <- matrix(0, nrow = p, ncol = p,
+              dimnames = list(colnames(df_disc), colnames(df_disc)))
+  for (i in seq_len(p)) {
+    for (j in i:p) {
+      # safe MI (skip NA rows; zero if not enough variation)
+      ok <- is.finite(df_disc[[i]]) & is.finite(df_disc[[j]])
+      xi <- df_disc[[i]][ok]; xj <- df_disc[[j]][ok]
+      mi <- if (length(unique(xi)) < 2 || length(unique(xj)) < 2) 0 else
+        suppressWarnings(infotheo::mutinformation(xi, xj))
+      M[i, j] <- mi
+      M[j, i] <- mi
+    }
+  }
+  M
+}
+
+# Compare two MI matrices (upper triangle only) -> 0–1 similarity score (higher = closer)
+mi_similarity_score <- function(M_real, M_synth) {
+  if (length(M_real) == 0 || length(M_synth) == 0) return(NA_real_)
+  common <- intersect(colnames(M_real), colnames(M_synth))
+  if (length(common) < 2) return(NA_real_)
+  R <- M_real[common, common, drop = FALSE]
+  S <- M_synth[common, common, drop = FALSE]
+  ut <- upper.tri(R, diag = FALSE)
+  mean_abs_diff <- mean(abs(R[ut] - S[ut]))
+  1 / (1 + mean_abs_diff)
+}
+
+# Discretize numeric columns (equal-frequency bins); keep only shared numeric vars
+Mutual_Information <- function(real_df, synth_df, nbins = 10) {
+  real_num  <- dplyr::select(real_df,  where(is.numeric))
+  synth_num <- strip_synth_prefix(synth_df) |> dplyr::select(where(is.numeric))
+
+  common <- intersect(names(real_num), names(synth_num))
+  if (length(common) < 2) return(NA_real_)
+
+  real_num  <- real_num[common]
+  synth_num <- synth_num[common]
+
+  # Discretize numerics (returns integer codes)
+  real_disc  <- as.data.frame(lapply(real_num,  \(x) infotheo::discretize(x, disc = "equalfreq", nbins = nbins)))
+  synth_disc <- as.data.frame(lapply(synth_num, \(x) infotheo::discretize(x, disc = "equalfreq", nbins = nbins)))
+
+  # MI matrices and similarity score
+  M_real  <- compute_mi_matrix(real_disc)
+  M_synth <- compute_mi_matrix(synth_disc)
+  mi_similarity_score(M_real, M_synth)
+}
+
+# ------- Compute scores and present nicely (percentages) -------
+mi_results <- tibble::tibble(
+  Dataset = c("Parametric MICE", "CART Imputation", "Synthpop (Low Fidelity)", "Metadata-Based"),
+  Mutual_Information = c(
+    Mutual_Information(heart_failure, syn_data_1),
+    Mutual_Information(heart_failure, syn_cart_1),
+    Mutual_Information(heart_failure, syn_data_low_fidelity_synthpop),
+    Mutual_Information(heart_failure, syn_data_metadata)
+  )
+) |>
+  mutate(Mutual_Information = round(Mutual_Information * 100, 1))  # convert to %
+
+# User-friendly table
+knitr::kable(
+  mi_results,
+  caption = "Mutual Information Similarity (%): higher = synthetic preserves dependency structure more closely",
+  align = "lr"
+)
+
+# Horizontal bar chart with custom colours
+ggplot(mi_results, aes(y = Dataset, x = Mutual_Information, fill = Dataset)) +
+  geom_col(alpha = 0.9, show.legend = FALSE) +
+  geom_text(aes(label = paste0(Mutual_Information, "%")), 
+            hjust = -0.1, size = 3.3) +
+  scale_fill_manual(values = dataset_palette) +
+  scale_x_continuous(labels = scales::percent_format(scale = 1), limits = c(0, 100)) +
+  labs(
+    title = "Mutual Information Similarity by Synthetic Method",
+    subtitle = "Based on pairwise MI matrices of discretized numeric variables (equal-frequency bins)",
+    x = "Similarity (%)", y = NULL
+  ) +
+  theme_minimal() +
+  theme(axis.text.y = element_text(size = 10))
+```
+
+### Correlation Score
+
+The Correlation Score measures how well the relationships (correlations) between variables are preserved in the synthetic dataset compared to the real.
+
+Ideal Ranges for Correlation Score:
+
+- **Perfect Alignment:** Correlations in the synthetic data should match the real closely, with deviations of 5-10% being acceptable.
+- **Weaker Correlations:** If synthetic correlations are weaker, it may indicate loss of fidelity due to noise.
+- **Stronger Correlations:** Stronger correlations suggest overfitting, which may increase privacy risks.
+
+```{r correlation-score, fig.width=10, fig.height=4, fig.align='center', out.width='100%'}
+
+# Custom palette for datasets
+dataset_palette <- c(
+  "Parametric MICE"         = "#B0D99B",
+  "CART Imputation"         = "#528AA8",
+  "Synthpop (Low Fidelity)" = "#FFB6DB",
+  "Metadata-Based"          = "#264653"
+)
+
+# --- Helper: strip 'synth_' so names align
+strip_synth_prefix <- function(df) {
+  names(df) <- sub("^synth_", "", names(df))
+  df
+}
+
+# --- Function to calculate Correlation Similarity Score
+calculate_correlation_score <- function(real_data, synthetic_data) {
+  # Keep numeric columns only
+  real_num  <- real_data[sapply(real_data, is.numeric)]
+  synth_num <- strip_synth_prefix(synthetic_data)[sapply(strip_synth_prefix(synthetic_data), is.numeric)]
+  
+  # Use only common variables
+  common <- intersect(names(real_num), names(synth_num))
+  if (length(common) < 2) return(NA_real_)
+  
+  real_corr  <- cor(real_num[common],  use = "complete.obs")
+  synth_corr <- cor(synth_num[common], use = "complete.obs")
+  
+  # Frobenius norm difference → similarity score in [0,1]
+  corr_diff <- norm(real_corr - synth_corr, type = "F")
+  1 / (1 + corr_diff)
+}
+
+# --- Compute scores for all synthetic datasets
+corr_scores <- tibble::tibble(
+  Dataset = c("Parametric MICE", "CART Imputation", "Synthpop (Low Fidelity)", "Metadata-Based"),
+  Correlation_Score = c(
+    calculate_correlation_score(heart_failure, syn_data_1),
+    calculate_correlation_score(heart_failure, syn_cart_1),
+    calculate_correlation_score(heart_failure, syn_data_low_fidelity_synthpop),
+    calculate_correlation_score(heart_failure, syn_data_metadata)
+  )
+) %>%
+  mutate(Correlation_Score = round(Correlation_Score * 100, 1))   # convert to %
+
+# --- User-friendly table
+kable(
+  corr_scores,
+  caption = "Correlation Similarity Scores (%): higher = synthetic preserves correlation structure more closely",
+  align = "lr"
+)
+
+# --- Horizontal bar chart with custom colours
+ggplot(corr_scores, aes(y = Dataset, x = Correlation_Score, fill = Dataset)) +
+  geom_col(alpha = 0.9, show.legend = FALSE) +
+  geom_text(aes(label = paste0(Correlation_Score, "%")), 
+            hjust = -0.1, size = 3.3) +
+  scale_fill_manual(values = dataset_palette) +
+  scale_x_continuous(labels = scales::percent_format(scale = 1), limits = c(0, 100)) +
+  labs(
+    title = "Correlation Similarity by Synthetic Method",
+    subtitle = "Based on Frobenius norm difference between real and synthetic correlation matrices",
+    x = "Similarity (%)", y = NULL
+  ) +
+  theme_minimal() +
+  theme(axis.text.y = element_text(size = 10))
+```
+
+## Utility Assessment
+
+### Feature Importance Consistency Assessment
+
+The Feature Importance Consistency Assessment evaluates how well the synthetic datasets retain the predictive significance of features compared to the real dataset. This assessment is essential for ensuring that the synthetic data accurately reflects the underlying relationships that contribute to the model's predictive performance.
+
+Feature importance measures each variable's contribution to model predictions. Consistency in feature importance rankings between the real and synthetic datasets serves as a crucial indicator of data quality. Significant discrepancies may indicate deficiencies in the synthetic data generation process, potentially affecting the performance of models trained on synthetic data.
+
+Ideal Ranges for Feature Importance Consistency Assessment:
+
+- **Perfect Match**: Feature importance scores in the synthetic dataset should closely align with those in the real dataset, particularly for highly predictive features.
+- **Acceptable Deviation**: A deviation of 10-15% is generally acceptable for most features. For variables identified as highly influential, stricter thresholds may be needed to maintain predictive accuracy.
+
+Types of Deviations
+
+- **Underrepresentation**: If an important feature has lower importance in the synthetic dataset, it may suggest that critical predictive relationships are not well-preserved.
+- **Overrepresentation**: If a feature's importance is higher in the synthetic data, this could indicate noise or overfitting, potentially distorting the model’s perception of feature relationships.
+
+The following visualisation techniques will be used to compare feature importance:
+
+- **Bar Plots for Feature Importance Comparison**: Bar plots will compare feature importance scores between the real and synthetic datasets. This visual comparison can reveal significant deviations.
+- **SHAP Summary Plots**: SHAP (SHapley Additive exPlanations) summary plots provide a comprehensive view of the distribution of SHAP values for each feature, allowing for a direct comparison between the real and synthetic datasets.
+
+```{r Feature Importance Consistency Assessment, fig.width=10, fig.height=4, fig.align='center', out.width='100%'}
+
+# Prepare the data for XGBoost
+set.seed(123)  # For reproducibility
+train_indices <- sample(seq_len(nrow(heart_failure)), size = 0.7 * nrow(heart_failure))
+train_real <- heart_failure[train_indices, ]
+test_real <- heart_failure[-train_indices, ]
+
+train_real_matrix <- model.matrix(deceased ~ age + sex + anaemia + creatinine_phosphokinase + diabetes + ejection_fraction + platelets + serum_creatinine + serum_sodium + smoking + hypertension + follow_up - 1, data = train_real)
+train_real_label <- train_real[rownames(train_real_matrix), "deceased"]
+train_real_label <- as.numeric(train_real_label) - 1  # Convert factor to 0 and 1
+
+train_synth <- syn_data_1[train_indices, ]
+train_synth_matrix <- model.matrix(deceased ~ age + sex + anaemia + creatinine_phosphokinase + diabetes + ejection_fraction + platelets + serum_creatinine + serum_sodium + smoking + hypertension + follow_up - 1, data = train_synth)
+train_synth_label <- train_synth[rownames(train_synth_matrix), "deceased"]
+train_synth_label <- as.numeric(train_synth_label) - 1  # Convert factor to 0 and 1
+
+# Convert to DMatrix format, which is required for XGBoost
+dtrain_real <- xgb.DMatrix(data = train_real_matrix, label = train_real_label)
+dtrain_synth <- xgb.DMatrix(data = train_synth_matrix, label = train_synth_label)
+
+# Set up parameters for XGBoost
+params <- list(
+  objective = "binary:logistic",
+  eval_metric = "auc",  # Use AUC as an evaluation metric
+  max_depth = 3,
+  eta = 0.1
+)
+
+# Tune hyperparameters using cross-validation (with parallel processing)
+cv_real <- xgb.cv(
+  params = params,
+  data = dtrain_real,
+  nrounds = 100,
+  nfold = 5,
+  verbose = 0,
+  early_stopping_rounds = 10,
+  nthread = num_cores  # Number of threads for parallel processing
+)
+
+best_nrounds_real <- cv_real$best_iteration
+
+cv_synth <- xgb.cv(
+  params = params,
+  data = dtrain_synth,
+  nrounds = 100,
+  nfold = 5,
+  verbose = 0,
+  early_stopping_rounds = 10,
+  nthread = num_cores  # Number of threads for parallel processing
+)
+
+best_nrounds_synth <- cv_synth$best_iteration
+
+# Train XGBoost on real data (TRTR)
+xgb_model_trtr <- xgboost(params = params, data = dtrain_real, nrounds = best_nrounds_real, verbose = 0, nthread = num_cores)
+
+# Train XGBoost on synthetic data (TSTR)
+xgb_model_tstr <- xgboost(params = params, data = dtrain_synth, nrounds = best_nrounds_synth, verbose = 0, nthread = num_cores)
+
+# Get feature importance for TRTR
+importance_trtr <- xgb.importance(feature_names = colnames(train_real_matrix), model = xgb_model_trtr)
+cat("Feature Importance for TRTR:\n")
+print(importance_trtr)
+
+# Get feature importance for TSTR
+importance_tstr <- xgb.importance(feature_names = colnames(train_synth_matrix), model = xgb_model_tstr)
+cat("\nFeature Importance for TSTR:\n")
+print(importance_tstr)
+
+# Visualise feature importance for TRTR and TSTR
+importance_trtr$Dataset <- "Real Data"
+importance_tstr$Dataset <- "Synthetic Data"
+
+importance_combined <- rbind(importance_trtr, importance_tstr)
+
+# Plot feature importance comparison
+ggplot(importance_combined, aes(x = reorder(Feature, Gain), y = Gain, fill = Dataset)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  coord_flip() +
+  labs(title = "Feature Importance Comparison (TRTR vs TSTR)",
+       x = "Feature",
+       y = "Gain") +
+  scale_fill_manual(values = c("Real Data" = "#B0D99B", "Synthetic Data" = "#528AA8")) +
+  theme_minimal()
+
+# Correlation analysis between feature importance rankings
+
+importance_trtr <- importance_trtr %>% mutate(rank = rank(-Gain))
+importance_tstr <- importance_tstr %>% mutate(rank = rank(-Gain))
+
+importance_ranking <- inner_join(importance_trtr, importance_tstr, by = "Feature", suffix = c("_trtr", "_tstr"))
+
+correlation <- cor(importance_ranking$rank_trtr, importance_ranking$rank_tstr, method = "spearman")
+cat("\nSpearman correlation Between TRTR and TSTR Feature Importance Rankings:\n")
+print(correlation)
+
+# Calculate SHAP values for better interpretability
+
+# SHAP values for TRTR
+shap_values_trtr <- shap.values(xgb_model_trtr, dtrain_real)
+shap_long_trtr <- shap.prep(shap_contrib = shap_values_trtr$shap_score, X_train = train_real_matrix)
+
+cat("\nSHAP Summary for TRTR:\n")
+shap_values_trtr$mean_shap_score %>% print()
+
+# SHAP values for TSTR
+shap_values_tstr <- shap.values(xgb_model_tstr, dtrain_synth)
+shap_long_tstr <- shap.prep(shap_contrib = shap_values_tstr$shap_score, X_train = train_synth_matrix)
+
+cat("\nSHAP Summary for TSTR:\n")
+shap_values_tstr$mean_shap_score %>% print()
+
+# SHAP visualisation
+shap.plot.summary(shap_long_trtr)
+shap.plot.summary(shap_long_tstr)
+```
+
+### Prediction Score
+
+The Prediction Score assesses synthetic data utility by comparing models trained on real data (Train Real Test Real (TRTR)) versus synthetic data (Train Synthetic Test Real (TSTR)) using two metrics:
+
+- **Accuracy**: The proportion of correct predictions made by the model.
+- **pMSE (Prediction Mean Squared Error)**: Measures the average of the squared differences between predicted and actual values.
+
+Ideal Ranges for Prediction Score:
+
+- **Accuracy**: TSTR accuracy should be within 5-10% of TRTR accuracy. Lower accuracy signals that synthetic data isn’t fully representative of the real dataset.
+- **pMSE**: TSTR pMSE should be close to TRTR pMSE. A 5-10% deviation is acceptable; a higher pMSE suggests synthetic data may not be accurately reflecting the true relationships in the real data.
+
+This section assesses the utility of synthetic data generated through various methods, using XGBoost to calculate both Accuracy and pMSE for TRTR and TSTR.
+
+
+```{r Prediction Score, fig.width=10, fig.height=4, fig.align='center', out.width='100%'}
+
+set.seed(123)
+
+# ---- helpers ----
+strip_synth_prefix <- function(df) { names(df) <- sub("^synth_", "", names(df)); df }
+
+align_target_levels <- function(df, levels_ref = NULL, positive = NULL) {
+  if (!is.factor(df$deceased)) {
+    if (is.numeric(df$deceased)) df$deceased <- factor(as.character(df$deceased)) else df$deceased <- factor(df$deceased)
+  }
+  if (!is.null(levels_ref)) df$deceased <- factor(df$deceased, levels = levels_ref)
+  lev <- levels(df$deceased)
+  if (length(lev) < 2) stop("Target 'deceased' must have two levels.")
+  pos <- if (!is.null(positive) && positive %in% lev) positive else if ("1" %in% lev) "1" else lev[2]
+  df$deceased <- stats::relevel(df$deceased, ref = pos)
+  list(data = df, levels = levels(df$deceased), positive = pos)
+}
+
+evaluate_model <- function(train_data, test_data, label, tune_grid, train_control, seed = 123) {
+  test_aln  <- align_target_levels(test_data)
+  train_aln <- align_target_levels(train_data, levels_ref = test_aln$levels, positive = test_aln$positive)
+  train_data <- train_aln$data
+  test_data  <- test_aln$data
+
+  set.seed(seed)
+  model <- caret::train(
+    deceased ~ follow_up + serum_creatinine + ejection_fraction +
+      creatinine_phosphokinase + serum_sodium + age + platelets,
+    data      = train_data,
+    method    = "xgbTree",
+    trControl = train_control,
+    tuneGrid  = tune_grid,
+    na.action = na.pass
+  )
+
+  pred <- predict(model, test_data)
+  acc  <- mean(pred == test_data$deceased, na.rm = TRUE)
+  yhat <- as.numeric(pred)
+  y    <- as.numeric(test_data$deceased)
+  pMSE <- mean((yhat - y)^2, na.rm = TRUE)
+
+  tibble::tibble(Dataset = label, Accuracy = acc, pMSE = pMSE)
+}
+
+# ---- CV setup ----
+train_control <- caret::trainControl(method = "cv", number = 5)
+tune_grid <- expand.grid(
+  nrounds = 50,
+  max_depth = 3,
+  eta = 0.1,
+  gamma = 0,
+  colsample_bytree = 0.8,
+  min_child_weight = 1,
+  subsample = 0.7
+)
+
+# ---- prepare synthetic splits ----
+syn_mice      <- strip_synth_prefix(syn_data_1)
+syn_cart      <- strip_synth_prefix(syn_cart_1)
+syn_synthpop  <- strip_synth_prefix(syn_data_low_fidelity_synthpop)
+syn_metadata  <- strip_synth_prefix(syn_data_metadata)
+
+train_synth_mice     <- syn_mice[train_indices, , drop = FALSE]
+train_synth_cart     <- syn_cart[train_indices, , drop = FALSE]
+train_synth_synthpop <- syn_synthpop[train_indices, , drop = FALSE]
+train_synth_metadata <- syn_metadata[train_indices, , drop = FALSE]
+
+# ---- results table ----
+results <- dplyr::bind_rows(
+  evaluate_model(train_real,               test_real, "TRTR (Real→Real)",     tune_grid, train_control),
+  evaluate_model(train_synth_mice,         test_real, "TSTR (MICE→Real)",     tune_grid, train_control),
+  evaluate_model(train_synth_cart,         test_real, "TSTR (CART→Real)",     tune_grid, train_control),
+  evaluate_model(train_synth_synthpop,     test_real, "TSTR (Synthpop→Real)", tune_grid, train_control),
+  evaluate_model(train_synth_metadata,     test_real, "TSTR (Metadata→Real)", tune_grid, train_control)
+) %>%
+  mutate(
+    Accuracy = scales::percent(Accuracy, accuracy = 0.1),
+    pMSE     = round(pMSE, 3)
+  )
+
+knitr::kable(
+  results,
+  caption = "Prediction Score Summary (XGBoost, 5-fold CV): TRTR vs TSTR",
+  align = "lrr"
+)
+
+# ---- horizontal Accuracy bar chart ----
+palette5 <- c("#B0D99B", "#528AA8", "#FFB6DB", "#264653", "#2A9D8F")
+
+plot_df <- results %>%
+  mutate(Accuracy_num = readr::parse_number(Accuracy) / 100)
+
+ggplot(plot_df, aes(y = Dataset, x = Accuracy_num, fill = Dataset)) +
+  geom_col(alpha = 0.9, show.legend = FALSE) +
+  geom_text(aes(label = Accuracy), hjust = -0.1, size = 3.5) +
+  scale_fill_manual(values = setNames(palette5, unique(plot_df$Dataset))) +
+  scale_x_continuous(labels = scales::percent_format(accuracy = 1), limits = c(0, 1)) +
+  labs(title = "Model Accuracy: TRTR vs TSTR", x = "Accuracy", y = NULL) +
+  theme_minimal()
+```
+
+### Quality Score (QScore)
+
+The QScore provides a comprehensive evaluation of synthetic data by aggregating multiple metrics, such as distribution similarity, feature importance, and correlation preservation, into a single score. This offers a clear, overall assessment of how well the synthetic data replicates the real dataset.
+
+Ideal Ranges for QScore:
+
+- **Excellent Quality (0.8 - 1.0)**: Indicates the synthetic data closely mirrors the real and can be confidently used for most analyses.
+- **Good Quality (0.6 - 0.8)**: Reflects good alignment, with some minor deviations. Suitable for most use cases, but some caution is advised.
+- **Moderate Quality (0.4 - 0.6)**: The synthetic data may be useful for exploratory analysis but shows significant deviations in key metrics.
+- **Poor Quality (< 0.4)**: The synthetic data poorly aligns with the real and is likely unsuitable for most analytic or modeling tasks.
+
+```{r Quality Score, fig.width=10, fig.height=4, fig.align='center', out.width='99%'}
+
+# ---- QScore helper ----
+calculate_qscore <- function(real_data, synthetic_data, num_queries = 10) {
+  numeric_real_vars  <- names(real_data)[sapply(real_data, is.numeric)]
+  numeric_synth_vars <- names(synthetic_data)[sapply(synthetic_data, is.numeric)]
+  common_vars <- intersect(numeric_real_vars, numeric_synth_vars)
+  if (length(common_vars) == 0) return(NA_real_)
+
+  qscores <- replicate(num_queries, {
+    var_name <- sample(common_vars, 1)
+    fun_name <- sample(c("mean", "sum"), 1)
+    fun      <- match.fun(fun_name)
+
+    real_val  <- fun(real_data[[var_name]],  na.rm = TRUE)
+    synth_val <- fun(synthetic_data[[var_name]], na.rm = TRUE)
+
+    if (!is.na(real_val) && real_val != 0 && !is.na(synth_val)) {
+      abs(real_val - synth_val) / abs(real_val)  # proportion difference (0–1)
+    } else {
+      0
+    }
+  })
+
+  mean(qscores, na.rm = TRUE)
+}
+
+# ---- Compute and present ----
+qscore_tbl <- tibble::tibble(
+  Dataset = c("Parametric MICE", "CART Imputation",
+              "Synthpop (Low Fidelity)", "Metadata-Based"),
+  QScore = c(
+    calculate_qscore(heart_failure, syn_data_1),
+    calculate_qscore(heart_failure, syn_cart_1),
+    calculate_qscore(heart_failure, syn_data_low_fidelity_synthpop),
+    calculate_qscore(heart_failure, syn_data_metadata)
+  )
+) %>%
+  dplyr::mutate(
+    QScore_num = QScore,                                   # keep numeric 0–1
+    QScore_pct = scales::percent(QScore_num, accuracy = 0.1) # pretty %
+  )
+
+# --- User-friendly table (as percentages) ---
+knitr::kable(
+  qscore_tbl %>% dplyr::select(Dataset, `QScore (%)` = QScore_pct),
+  caption = "Quality Score (QScore) — average % difference in aggregates (lower is better)",
+  align = "lr"
+)
+
+# --- Horizontal bar chart (percent axis) ---
+pal <- c("#B0D99B", "#528AA8", "#FFB6DB", "#264653", "#2A9D8F")
+
+ggplot(qscore_tbl, aes(y = Dataset, x = QScore_num, fill = Dataset)) +
+  geom_col(alpha = 0.9, show.legend = FALSE) +
+  geom_text(aes(label = QScore_pct), hjust = -0.1, size = 3.5) +
+  scale_fill_manual(values = setNames(pal[seq_len(nrow(qscore_tbl))], qscore_tbl$Dataset)) +
+  scale_x_continuous(labels = scales::percent_format(accuracy = 1), limits = c(0, 1),
+                     expand = expansion(mult = c(0, 0.05))) +
+  labs(
+    title = "QScore Comparison (Lower is Better)",
+    subtitle = "Average percentage difference between real and synthetic aggregates across random queries",
+    x = "QScore (%)", y = NULL
+  ) +
+  theme_minimal()
+```
+
+## Privacy / Disclosure Risk
+
+### Check for Replication of Real Value Combinations
+
+This check identifies if any records in the synthetic data are exact duplicates of those in the real dataset. High replication increases privacy risks, so minimal or no duplication is ideal for preserving privacy.
+
+```{r Check for Replication of Real Value Combinations, fig.width=8, fig.height=5, fig.align='center', out.width='99%'}
+
+# ---- Helper: replicated rows count ----
+check_replicated_rows <- function(real_data, synthetic_data) {
+  combined <- rbind(real_data, synthetic_data)
+  sum(duplicated(combined))
+}
+
+# ---- Build results table ----
+replication_tbl <- tibble::tibble(
+  Dataset = c("Parametric MICE", "Non-Parametric CART", 
+              "Synthpop (Low Fidelity)", "Metadata-Based"),
+  Replicated_Rows = c(
+    check_replicated_rows(heart_failure, syn_data_1),
+    check_replicated_rows(heart_failure, syn_cart_1),
+    check_replicated_rows(heart_failure, syn_data_low_fidelity_synthpop),
+    check_replicated_rows(heart_failure, syn_data_metadata)
+  )
+) %>%
+  mutate(
+    Total_Rows = nrow(heart_failure),
+    Replication_Percent = round((Replicated_Rows / Total_Rows) * 100, 2),
+    Status = ifelse(Replicated_Rows > 0, "⚠️ Replication Found", "✅ No Replication")
+  )
+
+# ---- User-friendly table ----
+knitr::kable(
+  replication_tbl,
+  caption = "Replication Check: Exact Matching Rows Between Real and Synthetic Datasets",
+  align = "lrrrl"
+)
+
+# ---- Optional: bar chart if any replication > 0 ----
+if (any(replication_tbl$Replicated_Rows > 0)) {
+  pal <- c("#B0D99B", "#528AA8", "#FFB6DB", "#264653")
+  
+  ggplot(replication_tbl, aes(y = Dataset, x = Replicated_Rows, fill = Dataset)) +
+    geom_col(alpha = 0.9, show.legend = FALSE) +
+    geom_text(aes(label = Replicated_Rows), hjust = -0.1, size = 3.5) +
+    scale_fill_manual(values = pal[seq_len(nrow(replication_tbl))]) +
+    labs(
+      title = "Replication of Real Rows in Synthetic Data",
+      subtitle = "Counts of exact duplicated rows across real and synthetic datasets",
+      x = "Number of Replicated Rows", y = NULL
+    ) +
+    theme_minimal()
+} else {
+  cat("✅ No replicated rows were found across any synthetic dataset. No plot is generated.\n")
+}
+```
+
+### Check for Unique Value Combinations
+
+This analysis compares the number of unique row combinations between the real and synthetic datasets. A high number of unique combinations in the synthetic data suggests that it captures diverse patterns while minimising the replication of sensitive information, enhancing privacy protection.
+
+```{r Check for Unique Value Combinations, fig.width=10, fig.height=4, fig.align='center', out.width='99%'}
+
+# ---- Helper: count unique rows ----
+unique_combinations <- function(data) {
+  nrow(unique(data))
+}
+
+# ---- Build results table ----
+unique_tbl <- tibble::tibble(
+  Dataset = c("Real Data", "Parametric MICE", 
+              "Non-Parametric CART", "Synthpop (Low Fidelity)", 
+              "Metadata-Based"),
+  Unique_Combinations = c(
+    unique_combinations(heart_failure),
+    unique_combinations(syn_data_1),
+    unique_combinations(syn_cart_1),
+    unique_combinations(syn_data_low_fidelity_synthpop),
+    unique_combinations(syn_data_metadata)
+  )
+) %>%
+  mutate(
+    Total_Rows = c(nrow(heart_failure), rep(nrow(heart_failure), 4)),
+    Percent_Unique = round((Unique_Combinations / Total_Rows) * 100, 2)
+  )
+
+# ---- User-friendly table ----
+knitr::kable(
+  unique_tbl,
+  caption = "Unique Value Combinations in Real vs. Synthetic Datasets",
+  align = "lrr"
+)
+
+# ---- Plot only if any dataset has > 0 unique rows ----
+if (any(unique_tbl$Unique_Combinations > 0, na.rm = TRUE)) {
+  pal <- c("#B0D99B", "#528AA8", "#FFB6DB", "#264653", "#2A9D8F")
+
+  ggplot(unique_tbl, aes(y = Dataset, x = Percent_Unique, fill = Dataset)) +
+    geom_col(alpha = 0.9, show.legend = FALSE) +
+    geom_text(aes(label = paste0(Percent_Unique, "%")), hjust = -0.1, size = 3.5) +
+    scale_fill_manual(values = pal[seq_len(nrow(unique_tbl))]) +
+    scale_x_continuous(limits = c(0, 100)) +
+    labs(
+      title = "Percentage of Unique Row Combinations",
+      subtitle = "Higher % means fewer duplicates within the dataset",
+      x = "Percent of Rows that are Unique", y = NULL
+    ) +
+    theme_minimal()
+} else {
+  cat("✅ No unique combinations detected across datasets.  No plot is generated. \n")
+}
+```
+
+### Exact Match Score
+
+The Exact Match Score measures how many individual records in the synthetic data are identical to records in the real dataset. Lower scores are ideal for privacy preservation, as high exact matches may pose privacy risks.
+
+Ideal Ranges for Exact Match Score:
+
+- **0 - 0.1**: Strong privacy protection with minimal or no exact matches, ideal for most privacy-preserving synthetic data.
+- **0.1 - 0.3**: Moderate exact matches, indicating some privacy risk but generally acceptable for many use cases.
+- **0.3 - 0.5**: Higher exact matches, raising privacy concerns. Review is needed to ensure proper data generation.
+- **Above 0.5**: Significant privacy risk, as the synthetic data too closely replicates the real.
+
+```{r Exact Match Score, fig.width=8, fig.height=5, fig.align='center', out.width='99%'}
+
+# ---- Helper: Membership Inference Score ----
+calculate_membership_inference_score <- function(real_data, synthetic_data, k = 5, threshold = 0.01) {
+  real_num  <- real_data[sapply(real_data, is.numeric)]
+  synth_num <- synthetic_data[sapply(synthetic_data, is.numeric)]
+  if (ncol(real_num) == 0 || ncol(synth_num) == 0) return(NA_real_)
+  common <- intersect(names(real_num), names(synth_num))
+  if (length(common) == 0) return(NA_real_)
+  real_num  <- real_num[common]
+  synth_num <- synth_num[common]
+  real_cc  <- real_num[complete.cases(real_num), , drop = FALSE]
+  synth_cc <- synth_num[complete.cases(synth_num), , drop = FALSE]
+  if (nrow(real_cc) < k || nrow(synth_cc) == 0) return(NA_real_)
+  real_scaled  <- scale(real_cc)
+  synth_scaled <- scale(synth_cc)
+  nn <- FNN::get.knnx(real_scaled, synth_scaled, k)$nn.dist
+  risky <- sum(rowMeans(nn) < threshold)
+  risky / nrow(synth_scaled)
+}
+
+# ---- Results table ----
+mis_tbl <- tibble::tibble(
+  Dataset = c("Parametric MICE", "Non-Parametric CART",
+              "Synthpop (Low Fidelity)", "Metadata-Based"),
+  Membership_Inference_Score = c(
+    calculate_membership_inference_score(heart_failure, syn_data_1),
+    calculate_membership_inference_score(heart_failure, syn_cart_1),
+    calculate_membership_inference_score(heart_failure, syn_data_low_fidelity_synthpop),
+    calculate_membership_inference_score(heart_failure, syn_data_metadata)
+  )
+) %>%
+  mutate(
+    Membership_Inference_Score = round(Membership_Inference_Score, 4),
+    Status = dplyr::case_when(
+      is.na(Membership_Inference_Score)              ~ "— Insufficient data",
+      Membership_Inference_Score == 0                ~ "✅ No risky memberships",
+      Membership_Inference_Score < 0.01              ~ "⚠️ Low risk",
+      TRUE                                           ~ "❌ High risk"
+    )
+  )
+
+# ---- User-friendly table ----
+knitr::kable(
+  mis_tbl,
+  caption = "Membership Inference Score: Proportion of synthetic records that are very close to real records (lower is better for privacy)",
+  align   = "lrr"
+)
+
+# ---- Conditional plot ----
+if (any(mis_tbl$Membership_Inference_Score > 0, na.rm = TRUE)) {
+  pal <- c("#B0D99B", "#528AA8", "#FFB6DB", "#264653")
+  ggplot(mis_tbl, aes(y = Dataset, x = Membership_Inference_Score, fill = Dataset)) +
+    geom_col(alpha = 0.9, show.legend = FALSE, na.rm = TRUE) +
+    geom_text(
+      aes(label = ifelse(is.na(Membership_Inference_Score), "NA",
+                         scales::percent(Membership_Inference_Score, accuracy = 0.01))),
+      hjust = -0.1, size = 3.5
+    ) +
+    scale_fill_manual(values = pal[seq_len(nrow(mis_tbl))]) +
+    scale_x_continuous(labels = scales::percent_format(accuracy = 1)) +
+    labs(
+      title    = "Membership Inference Score by Synthetic Method",
+      subtitle = "Lower values indicate better privacy protection",
+      x = "Score (Proportion of risky memberships)",
+      y = NULL
+    ) +
+    theme_minimal()
+} else {
+  cat("✅ All Membership Inference Scores are 0. No privacy risks detected, so no plot is generated\n")
+}
+```
+
+### Neighbors' Privacy Score
+
+The Neighbors' Privacy Score identifies real records that are "too similar" to synthetic records by using a nearest-neighbors search. This metric helps evaluate privacy risk by detecting synthetic records that closely resemble real data, which could compromise privacy.
+
+Ideal Ranges for Neighbors' Privacy Score:
+
+- **0 - 0.1**: Indicates strong privacy protection, with very few synthetic records too similar to real ones.
+- **0.1 - 0.3**: Moderate similarity, where privacy risk exists but remains within acceptable limits for many cases.
+- **Above 0.3**: Higher similarity, raising privacy concerns and requiring review to ensure the synthetic data is not too closely mimicking real data.
+
+```{r Neighbors Privacy Score, fig.width=8, fig.height=5, fig.align='center', out.width='99%'}
+
+# ---- Helper: Neighbors' Privacy Score ----
+calculate_neighbors_privacy_score <- function(real_data, synthetic_data, k = 5, threshold = 0.01) {
+  # Numeric-only columns
+  real_num  <- real_data[sapply(real_data, is.numeric)]
+  synth_num <- synthetic_data[sapply(synthetic_data, is.numeric)]
+  
+  if (ncol(real_num) == 0 || ncol(synth_num) == 0) return(NA_real_)
+  
+  # Keep only common columns
+  common <- intersect(names(real_num), names(synth_num))
+  if (length(common) == 0) return(NA_real_)
+  real_num  <- real_num[common]
+  synth_num <- synth_num[common]
+  
+  # Complete cases
+  real_cc  <- real_num[complete.cases(real_num), , drop = FALSE]
+  synth_cc <- synth_num[complete.cases(synth_num), , drop = FALSE]
+  
+  if (nrow(real_cc) < k || nrow(synth_cc) == 0) return(NA_real_)
+  
+  # Standardise
+  real_scaled  <- scale(real_cc)
+  synth_scaled <- scale(synth_cc)
+  
+  # k-NN distances from synthetic → real
+  neighbors <- FNN::get.knnx(real_scaled, synth_scaled, k)$nn.dist
+  
+  # Privacy risk: synthetic records "too close" to real
+  close_matches <- sum(rowMeans(neighbors) < threshold)
+  score <- close_matches / nrow(synth_scaled)
+  
+  return(score)
+}
+
+# ---- Build results table ----
+neighbors_tbl <- tibble::tibble(
+  Dataset = c("Parametric MICE", "Non-Parametric CART",
+              "Synthpop (Low Fidelity)", "Metadata-Based"),
+  Neighbors_Privacy_Score = c(
+    calculate_neighbors_privacy_score(heart_failure, syn_data_1),
+    calculate_neighbors_privacy_score(heart_failure, syn_cart_1),
+    calculate_neighbors_privacy_score(heart_failure, syn_data_low_fidelity_synthpop),
+    calculate_neighbors_privacy_score(heart_failure, syn_data_metadata)
+  )
+) %>%
+  mutate(
+    Neighbors_Privacy_Score = round(Neighbors_Privacy_Score, 4),
+    Status = case_when(
+      Neighbors_Privacy_Score == 0 ~ "✅ No risky neighbors",
+      Neighbors_Privacy_Score < 0.01 ~ "⚠️ Low risk",
+      TRUE ~ "❌ High risk"
+    )
+  )
+
+# ---- User-friendly table ----
+knitr::kable(
+  neighbors_tbl,
+  caption = "Neighbors' Privacy Score: Proportion of synthetic records too close to real records (lower is better for privacy)",
+  align = "lrr"
+)
+
+# ---- Plot only if any score > 0 ----
+if (any(neighbors_tbl$Neighbors_Privacy_Score > 0)) {
+  pal <- c("#B0D99B", "#528AA8", "#FFB6DB", "#264653")
+  
+  ggplot(neighbors_tbl, aes(y = Dataset, x = Neighbors_Privacy_Score, fill = Dataset)) +
+    geom_col(alpha = 0.9, show.legend = FALSE) +
+    geom_text(aes(label = Neighbors_Privacy_Score), hjust = -0.1, size = 3.5) +
+    scale_fill_manual(values = pal[seq_len(nrow(neighbors_tbl))]) +
+    scale_x_continuous(labels = scales::percent_format(accuracy = 0.1)) +
+    labs(
+      title = "Neighbors' Privacy Score by Synthetic Method",
+      subtitle = "Lower values mean synthetic records are less likely to be close replicas of real individuals",
+      x = "Privacy Score (Proportion of risky neighbors)", y = NULL
+    ) +
+    theme_minimal()
+} else {
+  cat("✅ All Neighbors' Privacy Scores are 0. No risky neighbors detected. No plot is generated.\n")
+}
+```
+
+### Membership Inference Score
+
+The Membership Inference Score evaluates the risk of membership inference attacks, which attempt to determine whether a specific record belongs to the real dataset. This metric helps assess the vulnerability of synthetic data to privacy breaches.
+
+Ideal Ranges for Membership Inference Score:
+
+- **0 - 0.1**: Indicates low risk, where it is unlikely that membership inference attacks can accurately identify real records.
+- **0.1 - 0.3**: Moderate risk, where some vulnerability to membership inference exists but may still be acceptable for certain use cases.
+- **Above 0.3**: High risk, suggesting significant privacy concerns as the synthetic data could reveal membership information about the real records.
+
+```{r Membership Inference Score, fig.width=8, fig.height=5, fig.align='center', out.width='99%'}
+
+# ---- Helper: Membership Inference Score ----
+# Interpreted as the proportion of synthetic records that are "too close" to the real data.
+# Lower is better (safer).
+calculate_membership_inference_score <- function(real_data, synthetic_data, k = 5, threshold = 0.01) {
+  # Numeric-only columns
+  real_num  <- real_data[sapply(real_data, is.numeric)]
+  synth_num <- synthetic_data[sapply(synthetic_data, is.numeric)]
+
+  # Guardrails
+  if (ncol(real_num) == 0 || ncol(synth_num) == 0) return(NA_real_)
+
+  # Keep only common numeric variables
+  common <- intersect(names(real_num), names(synth_num))
+  if (length(common) == 0) return(NA_real_)
+  real_num  <- real_num[common]
+  synth_num <- synth_num[common]
+
+  # Use complete cases
+  real_cc  <- real_num[complete.cases(real_num), , drop = FALSE]
+  synth_cc <- synth_num[complete.cases(synth_num), , drop = FALSE]
+  if (nrow(real_cc) < k || nrow(synth_cc) == 0) return(NA_real_)
+
+  # Standardize
+  real_scaled  <- scale(real_cc)
+  synth_scaled <- scale(synth_cc)
+
+  # k-NN distances from synthetic → real
+  nn <- FNN::get.knnx(real_scaled, synth_scaled, k)$nn.dist
+
+  # Score: proportion of synthetic records whose average distance to k nearest reals is below threshold
+  risky <- sum(rowMeans(nn) < threshold)
+  risky / nrow(synth_scaled)
+}
+
+# ---- Results table ----
+mis_tbl <- tibble::tibble(
+  Dataset = c("Parametric MICE", "Non-Parametric CART",
+              "Synthpop (Low Fidelity)", "Metadata-Based"),
+  Membership_Inference_Score = c(
+    calculate_membership_inference_score(heart_failure, syn_data_1),
+    calculate_membership_inference_score(heart_failure, syn_cart_1),
+    calculate_membership_inference_score(heart_failure, syn_data_low_fidelity_synthpop),
+    calculate_membership_inference_score(heart_failure, syn_data_metadata)
+  )
+) %>%
+  mutate(
+    Membership_Inference_Score = round(Membership_Inference_Score, 4),
+    Status = dplyr::case_when(
+      is.na(Membership_Inference_Score)              ~ "— Insufficient data",
+      Membership_Inference_Score == 0                ~ "✅ No risky memberships",
+      Membership_Inference_Score < 0.01              ~ "⚠️ Low risk",
+      TRUE                                           ~ "❌ High risk"
+    )
+  )
+
+# ---- User-friendly table ----
+knitr::kable(
+  mis_tbl,
+  caption = "Membership Inference Score: Proportion of synthetic records that are very close to real records (lower is better for privacy)",
+  align   = "lrr"
+)
+
+# ---- Plot only if any risky memberships (> 0) ----
+if (any(mis_tbl$Membership_Inference_Score > 0, na.rm = TRUE)) {
+  pal <- c("#B0D99B", "#528AA8", "#FFB6DB", "#264653")
+  
+  ggplot(mis_tbl, aes(y = Dataset, x = Membership_Inference_Score, fill = Dataset)) +
+    geom_col(alpha = 0.9, show.legend = FALSE, na.rm = TRUE) +
+    geom_text(
+      aes(label = ifelse(is.na(Membership_Inference_Score), "NA",
+                         scales::percent(Membership_Inference_Score, accuracy = 0.01))),
+      hjust = -0.1, size = 3.5
+    ) +
+    scale_fill_manual(values = pal[seq_len(nrow(mis_tbl))]) +
+    scale_x_continuous(labels = scales::percent_format(accuracy = 1)) +
+    labs(
+      title    = "Membership Inference Score by Synthetic Method",
+      subtitle = "Lower values indicate better privacy protection",
+      x = "Score (Proportion of risky memberships)",
+      y = NULL
+    ) +
+    theme_minimal()
+} else {
+  cat("✅ All Membership Inference Scores are 0. No risky memberships detected. No plot is generated. \n")
+}
+```
+
+## Conclusions
+
+This report evaluated the fidelity, utility, privacy, and overall quality of synthetic data generated using parametric MICE, non-parametric CART, Synthpop, and metadata-based methods. Key findings include:
+
+- **Data Structure Preservation**: All methods preserved the structure of the real dataset, though minor variations in variable distributions were observed.
+- **Categorical Variables**: Most synthetic datasets retained categorical levels, but frequency distribution discrepancies were particularly notable in Synthpop data.
+- **Numeric Variables**: The range and distribution of numeric variables were largely maintained across methods, with slight variations in density plots.
+- **Correlation & Mutual Information**: While most methods captured variable relationships, weaker correlations and lower mutual information scores suggested some loss of feature dependencies in certain synthetic datasets.
+- **Utility (Prediction Score)**: Synthetic data performed similarly to real data in predictive modeling, though slight reductions in accuracy and increased pMSE indicated less precise representation of the real dataset's predictive capabilities.
+- **Privacy (Exact Match & Neighbors' Privacy Scores)**: All synthetic datasets demonstrated strong privacy protection, with zero values for both Exact Match and Neighbors' Privacy Scores. This indicates that no synthetic records were identical to or highly similar to any real records, affirming robust privacy across all methods.
+
+In conclusion, synthetic data generated through these methods provides a balance between utility and privacy, though method selection should align with specific analytic or privacy needs.
+
+```{r Stop the parallel cluster}
+
+# Stop the parallel cluster
+stopCluster(cl)
+registerDoSEQ()
+```
+
