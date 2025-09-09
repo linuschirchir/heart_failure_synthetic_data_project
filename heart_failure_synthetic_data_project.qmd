@@ -130,17 +130,20 @@ knitr::kable(
 Here's the preview of the structure of the heart failure dataset.
 
 ```{r display the structure of the dataset}
-
-# Display the structure of the dataset
-data.frame(
+df <- data.frame(
   Variable = names(heart_failure),
-  Type = sapply(heart_failure, \(x) paste(class(x), collapse = ", ")),
-  Values = sapply(heart_failure, \(x) paste(head(unique(x), 10), collapse = ", "))
-) |>
-  knitr::kable(
-    caption = "Structure of the Heart Failure Dataset: Variables, Types, and Values",
-    align = c("l","l","l")
-  )
+  Type   = unname(sapply(heart_failure, \(x) paste(class(x), collapse = ", "))),
+  Values = unname(sapply(heart_failure, \(x) paste(head(unique(x), 10), collapse = ", "))),
+  row.names = NULL,
+  check.names = FALSE
+)
+
+knitr::kable(
+  df,
+  caption = "Structure of the Heart Failure Dataset: Variables, Types, and Values",
+  align = c("l","l","l"),
+  row.names = FALSE
+)
 ```
 
 <br>
@@ -259,16 +262,24 @@ syn_data_1 <- syn_data_1 %>%
 # Add a prefix 'synth_' to all synthetic dataset variable names
 colnames(syn_data_1) <- paste("synth", colnames(syn_data_1), sep = "_")
 
-# Display the structure of the dataset
-data.frame(
+# Display the structure of the dataset (fix double variable issue)
+df_syn <- data.frame(
   Variable = names(syn_data_1),
-  Type = sapply(syn_data_1, \(x) paste(class(x), collapse = ", ")),
-  Values = sapply(syn_data_1, \(x) paste(head(unique(x), 10), collapse = ", "))
-) |>
-  knitr::kable(
-    caption = "Structure of the Heart Failure Dataset: Variables, Types, and Values",
-    align = c("l","l","l")
-  )
+  Type   = unname(sapply(syn_data_1, \(x) paste(class(x), collapse = ", "))),
+  Values = unname(sapply(syn_data_1, \(x) paste(head(unique(x), 10), collapse = ", "))),
+  row.names = NULL,
+  check.names = FALSE
+)
+
+# Remove duplicated variables if any
+df_syn <- df_syn[!duplicated(df_syn$Variable), ]
+
+knitr::kable(
+  df_syn,
+  caption = "Structure of the Heart Failure Dataset: Variables, Types, and Values",
+  align = c("l","l","l"),
+  row.names = FALSE
+)
 ```
 
 ### Non-Parametric Imputation Using CART
@@ -304,16 +315,24 @@ syn_cart_1 <- syn_cart_1 %>%
 # Add a prefix 'synth_' to all synthetic dataset variable names
 colnames(syn_cart_1) <- paste("synth", colnames(syn_cart_1), sep = "_")
 
-# Display the structure of the dataset
-data.frame(
+# Display the structure of the dataset (fix double variable issue)
+df_cart <- data.frame(
   Variable = names(syn_cart_1),
-  Type = sapply(syn_cart_1, \(x) paste(class(x), collapse = ", ")),
-  Values = sapply(syn_cart_1, \(x) paste(head(unique(x), 10), collapse = ", "))
-) |>
-  knitr::kable(
-    caption = "Structure of the Heart Failure Dataset: Variables, Types, and Values",
-    align = c("l","l","l")
-  )
+  Type   = unname(sapply(syn_cart_1, \(x) paste(class(x), collapse = ", "))),
+  Values = unname(sapply(syn_cart_1, \(x) paste(head(unique(x), 10), collapse = ", "))),
+  row.names = NULL,
+  check.names = FALSE
+)
+
+# Remove duplicated variables if any
+df_cart <- df_cart[!duplicated(df_cart$Variable), ]
+
+knitr::kable(
+  df_cart,
+  caption = "Structure of the Heart Failure Dataset: Variables, Types, and Values (CART Imputation)",
+  align = c("l","l","l"),
+  row.names = FALSE
+)
 ```
 
 ### Generating Synthetic Data Using Synthpop
@@ -344,16 +363,24 @@ syn_data_low_fidelity_synthpop <- syn_data_low_fidelity_synthpop %>%
 # Add a prefix 'synth_' to all synthetic dataset variable names
 colnames(syn_data_low_fidelity_synthpop) <- paste("synth", colnames(syn_data_low_fidelity_synthpop), sep = "_")
 
-# Display the structure of the dataset
-data.frame(
+# Display the structure of the dataset (fix double variable issue)
+df_synthpop <- data.frame(
   Variable = names(syn_data_low_fidelity_synthpop),
-  Type = sapply(syn_data_low_fidelity_synthpop, \(x) paste(class(x), collapse = ", ")),
-  Values = sapply(syn_data_low_fidelity_synthpop, \(x) paste(head(unique(x), 10), collapse = ", "))
-) |>
-  knitr::kable(
-    caption = "Structure of the Heart Failure Dataset: Variables, Types, and Values",
-    align = c("l","l","l")
-  )
+  Type   = unname(sapply(syn_data_low_fidelity_synthpop, \(x) paste(class(x), collapse = ", "))),
+  Values = unname(sapply(syn_data_low_fidelity_synthpop, \(x) paste(head(unique(x), 10), collapse = ", "))),
+  row.names = NULL,
+  check.names = FALSE
+)
+
+# Remove duplicated variables if any
+df_synthpop <- df_synthpop[!duplicated(df_synthpop$Variable), ]
+
+knitr::kable(
+  df_synthpop,
+  caption = "Structure of the Heart Failure Dataset: Variables, Types, and Values (Synthpop)",
+  align = c("l","l","l"),
+  row.names = FALSE
+)
 ```
 
 ### Generating Synthetic Data Using Metadada
@@ -419,16 +446,24 @@ syn_data_metadata <- syn_data_metadata %>%
 # Add a prefix 'synth_' to all synthetic dataset variable names
 colnames(syn_data_metadata) <- paste("synth", colnames(syn_data_metadata), sep = "_")
 
-# Display the structure of the dataset
-data.frame(
+# Display the structure of the dataset (fix double variable issue)
+df_metadata <- data.frame(
   Variable = names(syn_data_metadata),
-  Type = sapply(syn_data_metadata, \(x) paste(class(x), collapse = ", ")),
-  Values = sapply(syn_data_metadata, \(x) paste(head(unique(x), 10), collapse = ", "))
-) |>
-  knitr::kable(
-    caption = "Structure of the Heart Failure Dataset: Variables, Types, and Values",
-    align = c("l","l","l")
-  )
+  Type   = unname(sapply(syn_data_metadata, \(x) paste(class(x), collapse = ", "))),
+  Values = unname(sapply(syn_data_metadata, \(x) paste(head(unique(x), 10), collapse = ", "))),
+  row.names = NULL,
+  check.names = FALSE
+)
+
+# Remove duplicated variables if any
+df_metadata <- df_metadata[!duplicated(df_metadata$Variable), ]
+
+knitr::kable(
+  df_metadata,
+  caption = "Structure of the Heart Failure Dataset: Variables, Types, and Values (Metadata)",
+  align = c("l","l","l"),
+  row.names = FALSE
+)
 ```
 
 ## Synthetic Data Identification
@@ -567,7 +602,7 @@ This analysis evaluates how well the numeric variables in the synthetic datasets
 
 ```{r Numeric Variables: Range and Distribution Comparison}
 
-# Helper: compute per-variable stats for a (real, synthetic) pair
+# Compute per-variable stats for a (real, synthetic) pair
 numeric_summary <- function(real, synth, dataset_name) {
   num_vars <- names(real)[sapply(real, is.numeric)]
   # real percentiles
@@ -625,7 +660,7 @@ metric_palette <- c(
   "Missing Observations" = "#2A9D8F"
 )
 
-# Helper: strip 'synth_' for fair visuals
+# Strip 'synth_' for fair visuals
 strip_synth_prefix <- function(df) { 
   names(df) <- sub("^synth_", "", names(df)) 
   df 
@@ -695,7 +730,7 @@ wrap_plots(
 
 ```{r Missingness Proportions and Comparison Outcome}
 
-# Helper: remove 'synth_' prefix so names match the real dataset
+# Remove 'synth_' prefix so names match the real dataset
 strip_synth_prefix <- function(df) {
   names(df) <- sub("^synth_", "", names(df))
   df
@@ -796,7 +831,7 @@ The `psych` package provides tools for analyzing and visualizing correlation mat
 
 ```{r correlation-matrices-comparison-table}
 
-# Helper: strip 'synth_' so names line up with real
+# Strip 'synth_' so names line up with real
 strip_synth_prefix <- function(df) {
   names(df) <- sub("^synth_", "", names(df))
   df
@@ -862,7 +897,7 @@ The `corrplot` package is widely used for visualizing correlation matrices. It p
 
 ```{r Correlation Matrices Comparison using Corrplot, fig.width=14, fig.height=6, fig.align='center', out.width='100%'}
 
-# Helper: remove 'synth_' so names match the real dataset
+# Remove 'synth_' so names match the real dataset
 strip_synth_prefix <- function(df) { names(df) <- sub("^synth_", "", names(df)); df }
 
 # Side-by-side correlation matrices (full width)
@@ -1511,7 +1546,7 @@ dataset_palette <- c(
   "Metadata-Based"          = "#264653"
 )
 
-# --- Helper: strip 'synth_' so names align
+# --- Strip 'synth_' so names align
 strip_synth_prefix <- function(df) {
   names(df) <- sub("^synth_", "", names(df))
   df
@@ -1914,7 +1949,7 @@ This check identifies if any records in the synthetic data are exact duplicates 
 
 ```{r Check for Replication of Real Value Combinations, fig.width=8, fig.height=5, fig.align='center', out.width='99%'}
 
-# ---- Helper: replicated rows count ----
+# ---- Replicated rows count ----
 check_replicated_rows <- function(real_data, synthetic_data) {
   combined <- rbind(real_data, synthetic_data)
   sum(duplicated(combined))
@@ -1969,7 +2004,7 @@ This analysis compares the number of unique row combinations between the real an
 
 ```{r Check for Unique Value Combinations, fig.width=10, fig.height=4, fig.align='center', out.width='99%'}
 
-# ---- Helper: count unique rows ----
+# ---- Count unique rows ----
 unique_combinations <- function(data) {
   nrow(unique(data))
 }
@@ -2032,7 +2067,7 @@ Ideal Ranges for Exact Match Score:
 
 ```{r Exact Match Score, fig.width=8, fig.height=5, fig.align='center', out.width='99%'}
 
-# ---- Helper: Membership Inference Score ----
+# ---- Membership Inference Score ----
 calculate_membership_inference_score <- function(real_data, synthetic_data, k = 5, threshold = 0.01) {
   real_num  <- real_data[sapply(real_data, is.numeric)]
   synth_num <- synthetic_data[sapply(synthetic_data, is.numeric)]
@@ -2115,7 +2150,7 @@ Ideal Ranges for Neighbors' Privacy Score:
 
 ```{r Neighbors Privacy Score, fig.width=8, fig.height=5, fig.align='center', out.width='99%'}
 
-# ---- Helper: Neighbors' Privacy Score ----
+# ---- Neighbors' Privacy Score ----
 calculate_neighbors_privacy_score <- function(real_data, synthetic_data, k = 5, threshold = 0.01) {
   # Numeric-only columns
   real_num  <- real_data[sapply(real_data, is.numeric)]
@@ -2208,7 +2243,7 @@ Ideal Ranges for Membership Inference Score:
 
 ```{r Membership Inference Score, fig.width=8, fig.height=5, fig.align='center', out.width='99%'}
 
-# ---- Helper: Membership Inference Score ----
+# ---- Membership Inference Score ----
 # Interpreted as the proportion of synthetic records that are "too close" to the real data.
 # Lower is better (safer).
 calculate_membership_inference_score <- function(real_data, synthetic_data, k = 5, threshold = 0.01) {
