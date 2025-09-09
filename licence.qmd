@@ -1,0 +1,24 @@
+---
+title: "License"
+---
+
+---
+
+This project — **Heart Failure Clinical Records Synthetic Data Project** — is released under the **MIT License**.  
+
+You are free to:
+
+- **Use** — Use the code, analysis, and documentation for personal, academic, or professional purposes.  
+- **Modify** — Adapt the code and analysis pipeline to fit your own projects.  
+- **Distribute** — Share copies of the project or derivative works.  
+- **Contribute** — Submit improvements via pull requests or forks.  
+
+As long as you:
+
+- **Provide attribution** — Credit **Linus Chirchir** as the original author.  
+- **Include the license** — Retain this license in any copies or significant portions of the project.  
+- **No warranty** — The project is provided *“as is”*, without warranty of any kind.  
+
+---
+
+### 📖 License Text (MIT)
