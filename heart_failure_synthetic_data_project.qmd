@@ -2067,74 +2067,151 @@ Ideal Ranges for Exact Match Score:
 
 ```{r Exact Match Score, fig.width=8, fig.height=5, fig.align='center', out.width='99%'}
 
-# ---- Membership Inference Score ----
-calculate_membership_inference_score <- function(real_data, synthetic_data, k = 5, threshold = 0.01) {
-  real_num  <- real_data[sapply(real_data, is.numeric)]
-  synth_num <- synthetic_data[sapply(synthetic_data, is.numeric)]
-  if (ncol(real_num) == 0 || ncol(synth_num) == 0) return(NA_real_)
-  common <- intersect(names(real_num), names(synth_num))
-  if (length(common) == 0) return(NA_real_)
-  real_num  <- real_num[common]
-  synth_num <- synth_num[common]
-  real_cc  <- real_num[complete.cases(real_num), , drop = FALSE]
-  synth_cc <- synth_num[complete.cases(synth_num), , drop = FALSE]
-  if (nrow(real_cc) < k || nrow(synth_cc) == 0) return(NA_real_)
-  real_scaled  <- scale(real_cc)
-  synth_scaled <- scale(synth_cc)
-  nn <- FNN::get.knnx(real_scaled, synth_scaled, k)$nn.dist
-  risky <- sum(rowMeans(nn) < threshold)
-  risky / nrow(synth_scaled)
+# ---- Exact Match Score ----
+
+calculate_exact_match_score <- function(real_data, synthetic_data) {
+
+# Use only shared columns (to avoid mismatched names / prefixed cols)
+
+common_cols <- intersect(names(real_data), names(synthetic_data))
+if (length(common_cols) == 0) {
+return(list(
+exact_match_rows   = NA_integer_,
+total_synth_rows   = NA_integer_,
+exact_match_score  = NA_real_
+))
+}
+
+real_aligned  <- real_data[, common_cols, drop = FALSE]
+synth_aligned <- synthetic_data[, common_cols, drop = FALSE]
+
+# Helper: build a row "signature" string for fast equality checking
+
+row_sig <- function(df) {
+apply(
+df,
+1,
+function(rowvals) paste(
+ifelse(is.na(rowvals), "<NA>", as.character(rowvals)),
+collapse = "||"
+)
+)
+}
+
+real_keys  <- unique(row_sig(real_aligned))
+synth_keys <- row_sig(synth_aligned)
+
+# Count exact matches (synthetic rows that appear verbatim in real)
+
+is_exact_match <- synth_keys %in% real_keys
+n_matches      <- sum(is_exact_match, na.rm = TRUE)
+total_synth    <- length(synth_keys)
+
+# Proportion of synthetic rows that are exact copies of real rows
+
+exact_score <- n_matches / total_synth
+
+list(
+exact_match_rows   = n_matches,
+total_synth_rows   = total_synth,
+exact_match_score  = exact_score
+)
 }
 
 # ---- Results table ----
-mis_tbl <- tibble::tibble(
-  Dataset = c("Parametric MICE", "Non-Parametric CART",
-              "Synthpop (Low Fidelity)", "Metadata-Based"),
-  Membership_Inference_Score = c(
-    calculate_membership_inference_score(heart_failure, syn_data_1),
-    calculate_membership_inference_score(heart_failure, syn_cart_1),
-    calculate_membership_inference_score(heart_failure, syn_data_low_fidelity_synthpop),
-    calculate_membership_inference_score(heart_failure, syn_data_metadata)
-  )
+
+exact_mice     <- calculate_exact_match_score(heart_failure, syn_data_1)
+exact_cart     <- calculate_exact_match_score(heart_failure, syn_cart_1)
+exact_synthpop <- calculate_exact_match_score(heart_failure, syn_data_low_fidelity_synthpop)
+exact_meta     <- calculate_exact_match_score(heart_failure, syn_data_metadata)
+
+exact_tbl <- tibble::tibble(
+Dataset = c("Parametric MICE",
+"Non-Parametric CART",
+"Synthpop (Low Fidelity)",
+"Metadata-Based"),
+Exact_Match_Rows = c(
+exact_mice$exact_match_rows,
+exact_cart$exact_match_rows,
+exact_synthpop$exact_match_rows,
+exact_meta$exact_match_rows
+),
+Total_Synthetic_Rows = c(
+exact_mice$total_synth_rows,
+exact_cart$total_synth_rows,
+exact_synthpop$total_synth_rows,
+exact_meta$total_synth_rows
+),
+Exact_Match_Score = c(
+exact_mice$exact_match_score,
+exact_cart$exact_match_score,
+exact_synthpop$exact_match_score,
+exact_meta$exact_match_score
+)
 ) %>%
-  mutate(
-    Membership_Inference_Score = round(Membership_Inference_Score, 4),
-    Status = dplyr::case_when(
-      is.na(Membership_Inference_Score)              ~ "— Insufficient data",
-      Membership_Inference_Score == 0                ~ "✅ No risky memberships",
-      Membership_Inference_Score < 0.01              ~ "⚠️ Low risk",
-      TRUE                                           ~ "❌ High risk"
-    )
-  )
+mutate(
+Exact_Match_Percent = round(Exact_Match_Score * 100, 3),
+Status = dplyr::case_when(
+is.na(Exact_Match_Score)                     ~ "— Insufficient data",
+Exact_Match_Score == 0                       ~ "✅ 0% (Strong Privacy)",
+Exact_Match_Score <= 0.10                    ~ "⚠️ ≤10% (Low Risk)",
+Exact_Match_Score <= 0.30                    ~ "❗ 10–30% (Moderate Risk)",
+Exact_Match_Score <= 0.50                    ~ "❌ 30–50% (High Risk)",
+TRUE                                         ~ "🚫 >50% (Critical Risk)"
+)
+)
 
 # ---- User-friendly table ----
+
 knitr::kable(
-  mis_tbl,
-  caption = "Membership Inference Score: Proportion of synthetic records that are very close to real records (lower is better for privacy)",
-  align   = "lrr"
+exact_tbl %>%
+dplyr::select(
+Dataset,
+Exact_Match_Rows,
+Total_Synthetic_Rows,
+`Exact Match %` = Exact_Match_Percent,
+Status
+),
+caption = "Exact Match Score: Proportion of synthetic rows that are perfect duplicates of real rows (lower is better for privacy)",
+align   = "lrrrl"
 )
 
 # ---- Conditional plot ----
-if (any(mis_tbl$Membership_Inference_Score > 0, na.rm = TRUE)) {
-  pal <- c("#B0D99B", "#528AA8", "#FFB6DB", "#264653")
-  ggplot(mis_tbl, aes(y = Dataset, x = Membership_Inference_Score, fill = Dataset)) +
-    geom_col(alpha = 0.9, show.legend = FALSE, na.rm = TRUE) +
-    geom_text(
-      aes(label = ifelse(is.na(Membership_Inference_Score), "NA",
-                         scales::percent(Membership_Inference_Score, accuracy = 0.01))),
-      hjust = -0.1, size = 3.5
-    ) +
-    scale_fill_manual(values = pal[seq_len(nrow(mis_tbl))]) +
-    scale_x_continuous(labels = scales::percent_format(accuracy = 1)) +
-    labs(
-      title    = "Membership Inference Score by Synthetic Method",
-      subtitle = "Lower values indicate better privacy protection",
-      x = "Score (Proportion of risky memberships)",
-      y = NULL
-    ) +
-    theme_minimal()
+
+if (any(exact_tbl$Exact_Match_Score > 0, na.rm = TRUE)) {
+pal <- c("#B0D99B", "#528AA8", "#FFB6DB", "#264653")
+
+ggplot(
+exact_tbl,
+aes(
+y = Dataset,
+x = Exact_Match_Percent,
+fill = Dataset
+)
+) +
+geom_col(alpha = 0.9, show.legend = FALSE, na.rm = TRUE) +
+geom_text(
+aes(label = paste0(Exact_Match_Percent, "%")),
+hjust = -0.1,
+size = 3.5
+) +
+scale_fill_manual(values = pal[seq_len(nrow(exact_tbl))]) +
+scale_x_continuous(
+limits = c(
+0,
+max(exact_tbl$Exact_Match_Percent, na.rm = TRUE) * 1.15
+)
+) +
+labs(
+title    = "Exact Match Score by Synthetic Method",
+subtitle = "Lower values mean fewer fully replicated real rows appear in the synthetic data",
+x        = "Exact Match (%)",
+y        = NULL
+) +
+theme_minimal()
+
 } else {
-  cat("✅ All Membership Inference Scores are 0. No privacy risks detected, so no plot is generated\n")
+cat("✅ All Exact Match Scores are 0%. No exact real-row replications found, so no plot is generated.\n")
 }
 ```
 
